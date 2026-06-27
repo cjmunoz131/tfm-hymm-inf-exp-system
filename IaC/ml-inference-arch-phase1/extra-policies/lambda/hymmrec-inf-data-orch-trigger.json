@@ -1,0 +1,19 @@
+[
+  {
+    "Sid": "AllowSSMParameterAccess",
+    "Effect": "Allow",
+    "Action": [
+      "ssm:GetParameter",
+      "ssm:GetParameters"
+    ],
+    "Resource": "arn:aws:ssm:${region}:${account_id}:parameter${ssm_parameter_prefix}/*"
+  },
+  {
+    "Sid": "AllowStepFunctionExecution",
+    "Effect": "Allow",
+    "Action": [
+      "states:StartExecution"
+    ],
+    "Resource": "${sfn_master_pipeline_arn}"
+  }
+]

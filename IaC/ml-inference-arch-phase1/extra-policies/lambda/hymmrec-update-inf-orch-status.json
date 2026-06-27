@@ -1,0 +1,30 @@
+[
+  {
+    "Sid": "AllowDynamoDBAccess",
+    "Effect": "Allow",
+    "Action": [
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:GetItem",
+      "dynamodb:Query"
+    ],
+    "Resource": "${dynamodb_table_arn}"
+  },
+  {
+    "Sid": "AllowDynamoDBTransactWrite",
+    "Effect": "Allow",
+    "Action": [
+      "dynamodb:TransactWriteItems"
+    ],
+    "Resource": "${dynamodb_table_arn}"
+  },
+  {
+    "Sid": "AllowKMSDecrypt",
+    "Effect": "Allow",
+    "Action": [
+      "kms:Decrypt",
+      "kms:GenerateDataKey"
+    ],
+    "Resource": "${kms_database_key_arn}"
+  }
+]

@@ -1,0 +1,225 @@
+Comment: A description of my state machine
+StartAt: Manifest Builder
+States:
+  Manifest Builder:
+    Type: Pass
+    Next: RegisterMasterOrchestrationExecution
+    Parameters:
+      workflowVersion: 1.0.0
+      execution_id.$: $.workflow_execution_plan.execution_id
+      pipeline_id.$: $.workflow_execution_plan.pipeline_id
+      execution_start_time.$: $$.Execution.StartTime
+      domain.$: $.workflow_execution_plan.domain
+      project.$: $.workflow_execution_plan.project
+      domain_project_id.$: $.workflow_execution_plan.domain_project_id
+      workflow_start_time.$: $.workflow_execution_plan.workflow_start_time
+      execution_type.$: $.workflow_execution_plan.execution_type
+      source_trigger.$: $.workflow_execution_plan.source_trigger
+      processes.$: $.workflow_execution_plan.processes
+      global_settings.$: $.workflow_execution_plan.global_settings
+  RegisterMasterOrchestrationExecution:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      FunctionName: ${registerMasterOrchestrationARN}
+      Payload.$: $
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: verifyRegisterOrchestrationSkipped
+    ResultPath: $.registerOrchestrationStatus
+    ResultSelector:
+      statusCode.$: $.Payload.statusCode
+      status.$: $.Payload.body.status
+      message.$: $.Payload.body.message
+      execution_time.$: $.Payload.body.execution_time
+  verifyRegisterOrchestrationSkipped:
+    Type: Choice
+    Choices:
+      - Next: Execution SKIPPED
+        And:
+          - Variable: $.registerOrchestrationStatus
+            IsPresent: true
+          - Variable: $.registerOrchestrationStatus.statusCode
+            NumericEquals: 409
+          - Variable: $.registerOrchestrationStatus.status
+            StringEquals: SKIPPED
+    Default: verifyRegisterOrchestrationSuccess
+  verifyRegisterOrchestrationSuccess:
+    Type: Choice
+    Choices:
+      - And:
+          - Variable: $.registerOrchestrationStatus
+            IsPresent: true
+          - Variable: $.registerOrchestrationStatus.statusCode
+            NumericEquals: 201
+          - Variable: $.registerOrchestrationStatus.status
+            StringEquals: IN_PROGRESS
+        Next: verifyBatchTransformItemTower
+    Default: Error
+  verifyBatchTransformItemTower:
+    Type: Choice
+    Choices:
+      - Next: BatchTransformItemTowerJob
+        And:
+          - Variable: $.processes
+            IsPresent: true
+          - Variable: $.processes[0]
+            IsPresent: true
+          - Variable: $.processes[0].flag_enabled
+            NumericEquals: 1
+    Default: verifyExtractPosterTMDB
+  BatchTransformItemTowerJob:
+    Type: Task
+    Resource: arn:aws:states:::sagemaker:createTransformJob.sync
+    Parameters:
+      ModelName: SageMakerCreateTransformJobModel-9iFBKsYti9vr
+      TransformInput:
+        CompressionType: None
+        ContentType: text/csv
+        DataSource:
+          S3DataSource:
+            S3DataType: S3Prefix
+            S3Uri: s3://my-s3bucket-example-1/TransformJobDataInput.txt
+      TransformOutput:
+        S3OutputPath: s3://my-s3bucket-example-1/TransformJobOutputPath
+      TransformResources:
+        InstanceCount: 1
+        InstanceType: ml.m4.xlarge
+      TransformJobName: sfn-binary-classification-prediction
+    Next: BatchTransformItemTower
+  BatchTransformItemTower:
+    Type: Task
+    Resource: arn:aws:states:::glue:startJobRun.sync
+    Parameters:
+      JobName: ${tmdb_baseline_bronze_glj}
+      Arguments:
+        --process_cod.$: $.processes[0].process_cod
+        --task_group_cod.$: $.processes[0].task_groups[0].task_group_cod
+        --task_cod.$: $.processes[0].task_groups[0].tasks[0].task_cod
+        --pipeline_id.$: $.pipeline_id
+        --correlation_id.$: $.execution_id
+    Next: StartCrawler
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Next: UpdateMasterOrchestrationStatusError
+        ResultPath: $.masterProcessError
+    ResultPath: null
+  StartCrawler:
+    Type: Task
+    Parameters:
+      Name: ${tmdb-bl-crawler-glue-name}
+    Resource: arn:aws:states:::aws-sdk:glue:startCrawler
+    Next: verifyExtractPosterTMDB
+    ResultPath: null
+  verifyExtractPosterTMDB:
+    Type: Choice
+    Choices:
+      - And:
+          - Variable: $.processes
+            IsPresent: true
+          - Variable: $.processes[1]
+            IsPresent: true
+          - Variable: $.processes[1].flag_enabled
+            NumericEquals: 1
+        Next: ExtractPosterTMDBSilver
+    Default: verifyCreateSilverTables
+  ExtractPosterTMDBSilver:
+    Type: Task
+    Resource: arn:aws:states:::glue:startJobRun.sync
+    Parameters:
+      JobName: ${tmdb_posters_silver_glj}
+      Arguments:
+        --process_cod.$: $.processes[1].process_cod
+        --task_group_cod.$: $.processes[1].task_groups[0].task_group_cod
+        --task_cod.$: $.processes[1].task_groups[0].tasks[0].task_cod
+        --pipeline_id.$: $.pipeline_id
+        --correlation_id.$: $.execution_id
+    Next: verifyCreateSilverTables
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Comment: ExtractPosterTMDBAllErrors
+        Next: UpdateMasterOrchestrationStatusError
+        ResultPath: $.masterProcessError
+    ResultPath: null
+  verifyCreateSilverTables:
+    Type: Choice
+    Choices:
+      - Next: CreateOBTSilverTables
+        And:
+          - Variable: $.processes
+            IsPresent: true
+          - Variable: $.processes[2]
+            IsPresent: true
+          - Variable: $.processes[2].flag_enabled
+            NumericEquals: 1
+    Default: UpdateMasterOrchestrationStatus
+  CreateOBTSilverTables:
+    Type: Task
+    Resource: arn:aws:states:::glue:startJobRun.sync
+    Parameters:
+      JobName: ${create_OBT_silver_glj}
+      Arguments:
+        --process_cod.$: $.processes[2].process_cod
+        --task_group_cod.$: $.processes[2].task_groups[0].task_group_cod
+        --task_cod.$: $.processes[2].task_groups[0].tasks[0].task_cod
+        --pipeline_id.$: $.pipeline_id
+        --correlation_id.$: $.execution_id
+    Next: UpdateMasterOrchestrationStatus
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Comment: CreateOBTSilverTablesError
+        Next: UpdateMasterOrchestrationStatusError
+        ResultPath: $.masterProcessError
+    ResultPath: null
+  UpdateMasterOrchestrationStatus:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    Parameters:
+      FunctionName: ${updateMasterOrchStatusARN}
+      Payload.$: $
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: Success
+  UpdateMasterOrchestrationStatusError:
+    Type: Task
+    Resource: arn:aws:states:::lambda:invoke
+    OutputPath: $.Payload
+    Parameters:
+      Payload.$: $
+      FunctionName: ${updateMasterOrchStatusARN}
+    Retry:
+      - ErrorEquals:
+          - Lambda.ServiceException
+          - Lambda.AWSLambdaException
+          - Lambda.SdkClientException
+          - Lambda.TooManyRequestsException
+        IntervalSeconds: 1
+        MaxAttempts: 3
+        BackoffRate: 2
+        JitterStrategy: FULL
+    Next: Error
+  Success:
+    Type: Succeed
+  Execution SKIPPED:
+    Type: Succeed
+  Error:
+    Type: Fail

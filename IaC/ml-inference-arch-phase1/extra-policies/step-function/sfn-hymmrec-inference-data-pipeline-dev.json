@@ -1,0 +1,102 @@
+[
+  {
+    "Sid": "AllowLambdaInvoke",
+    "Effect": "Allow",
+    "Action": "lambda:InvokeFunction",
+    "Resource": [
+      "${registerInferenceOrchestrationARN}",
+      "${updateInferenceOrchStatusARN}"
+    ]
+  },
+  {
+    "Sid": "AllowGlueJobExecution",
+    "Effect": "Allow",
+    "Action": [
+      "glue:StartJobRun",
+      "glue:GetJobRun",
+      "glue:GetJobRuns",
+      "glue:BatchGetJobs"
+    ],
+    "Resource": [
+      "${items_batch_preparation_job_ARN}",
+      "${items_opensearch_indexing_job_ARN}"
+    ]
+  },
+  {
+    "Sid": "AllowSageMakerBatchTransform",
+    "Effect": "Allow",
+    "Action": [
+      "sagemaker:CreateTransformJob",
+      "sagemaker:DescribeTransformJob",
+      "sagemaker:StopTransformJob",
+      "sagemaker:ListTags"
+    ],
+    "Resource": "arn:aws:sagemaker:${region}:${account_id}:transform-job/hymmrec-item-tower-bt-*"
+  },
+  {
+    "Sid": "AllowSageMakerModelAccess",
+    "Effect": "Allow",
+    "Action": [
+      "sagemaker:DescribeModel"
+    ],
+    "Resource": "arn:aws:sagemaker:${region}:${account_id}:model/*"
+  },
+  {
+    "Sid": "AllowIAMPassRoleForSageMaker",
+    "Effect": "Allow",
+    "Action": "iam:PassRole",
+    "Resource": "${sagemaker_bt_role_arn}",
+    "Condition": {
+      "StringEquals": {
+        "iam:PassedToService": "sagemaker.amazonaws.com"
+      }
+    }
+  },
+  {
+    "Sid": "AllowS3ForBatchTransform",
+    "Effect": "Allow",
+    "Action": [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket"
+    ],
+    "Resource": [
+      "arn:aws:s3:::${gold_bucket}",
+      "arn:aws:s3:::${gold_bucket}/*"
+    ]
+  },
+  {
+    "Sid": "AllowEventBridgeGlueJobNotification",
+    "Effect": "Allow",
+    "Action": [
+      "events:PutTargets",
+      "events:PutRule",
+      "events:DescribeRule"
+    ],
+    "Resource": [
+      "arn:aws:events:${region}:${account_id}:rule/StepFunctionsGetEventsForGlueJobsRule",
+      "arn:aws:events:${region}:${account_id}:rule/StepFunctionsGetEventsForSageMakerTransformJobsRule"
+    ]
+  },
+  {
+    "Sid": "AllowEventsForSyncIntegrations",
+    "Effect": "Allow",
+    "Action": [
+      "events:PutTargets",
+      "events:PutRule",
+      "events:DescribeRule"
+    ],
+    "Resource": "arn:aws:events:${region}:${account_id}:rule/*"
+  },
+  {
+    "Sid": "AllowXRayTracing",
+    "Effect": "Allow",
+    "Action": [
+      "xray:PutTraceSegments",
+      "xray:PutTelemetryRecords",
+      "xray:GetSamplingRules",
+      "xray:GetSamplingTargets"
+    ],
+    "Resource": "*"
+  }
+]

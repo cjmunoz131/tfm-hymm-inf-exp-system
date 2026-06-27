@@ -1,0 +1,32 @@
+# Terraform
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/.terraform.lock.hcl
+**/terraform.tfplan
+**/result.out
+**/*.tfvars
+!*.tfvars.example
+**/crash.log
+
+# Artefactos de build (lambdas zips, glue jars)
+**/dev/artefacts/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/

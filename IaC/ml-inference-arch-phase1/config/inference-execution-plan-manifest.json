@@ -1,0 +1,75 @@
+{
+  "workflow_execution_plan": {
+    "execution_id": "${execution-id}",
+    "pipeline_id": "${pipeline-id}",
+    "domain": "${domain}",
+    "project": "${project}",
+    "domain_project_id": "${domain-project-id}",
+    "workflow_start_time": "${workflow-start-time}",
+    "execution_type": "scheduled", 
+    "source_trigger": "scheduled_event_bridge",
+    "global_settings": {
+      "ignore_dependencies": false,
+      "max_retries": 2,
+      "notifications_enabled": false
+    },
+    "processes": [
+      {
+        "process_cod": "PRCS-BATCH-TRANSFORM-ITEM-TOWER-001",
+        "flag_enabled": 1,
+        "description": "Flujo de transformación en batch para obtención de embeddings del item tower",
+        "task_groups": [
+          {
+            "task_group_cod": "TSKG0001",
+            "task_group_priority": 1,
+            "tasks": [
+              { "task_cod": "TSK0001" }
+            ]
+          }
+        ]
+      },
+      {
+        "process_cod": "PRCS-INDEX-VECTOR-DATABASE-002",
+        "flag_enabled": 1,
+        "description": "Flujo de indexación de los documentos de items dentro del opensearch",
+        "task_groups": [
+          {
+            "task_group_cod": "TSKG0002",
+            "task_group_priority": 1,
+            "tasks": [
+              { "task_cod": "TSK0002" }
+            ]
+          }
+        ]
+      },
+      {
+        "process_cod": "PRCS-BATCH-TRANSFORM-RECOMMENDER-TOP3-003",
+        "flag_enabled": 0,
+        "description": "Flujo de generación de recomendaciones TOP-3 consumiendo el full model sagemaker endpoint",
+        "task_groups": [
+          {
+            "task_group_cod": "TSKG0003",
+            "task_group_priority": 1,
+            "tasks": [
+              { "task_cod": "TSK0003" }
+            ]
+          }
+        ]
+      },
+      {
+        "process_cod": "PRCS-IAGEN-SILVERSET-SLVR-004",
+        "flag_enabled": 0,
+        "description": "Flujo de generación y limpieza del silver set usando OpenAI GPT-4 e ingestandolo en el datalake Silver Zone",
+        "task_groups": [
+          {
+            "task_group_cod": "TSKG0004",
+            "task_group_priority": 1,
+            "tasks": [
+              { "task_cod": "TSK0004" }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
