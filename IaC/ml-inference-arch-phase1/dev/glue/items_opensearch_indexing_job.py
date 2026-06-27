@@ -138,7 +138,6 @@ OPENSEARCH_KNN_SETTINGS = {
                 "method": {
                     "name": "hnsw",
                     "space_type": "cosinesimil",
-                    "engine": "faiss",
                     "parameters": {
                         "ef_construction": 512,
                         "m": 16

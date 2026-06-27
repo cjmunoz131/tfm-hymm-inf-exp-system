@@ -101,6 +101,6 @@ variable "max_search_ocu" {
 variable "sagemaker_notebook_role_name" {
   description = "Nombre del IAM role de SageMaker Notebook (creado en data-arch-phase1)"
   type        = string
-  default     = "tfm-hymm-rec-sagemaker-notebook-role"
+  default     = "sgmkr-notebook-tfm-hymm-rec-ml-iar-dev"
 }
 
