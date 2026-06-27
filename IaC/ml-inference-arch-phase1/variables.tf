@@ -190,16 +190,10 @@ variable "item_tower_model_name" {
 }
 
 ###############################################################################
-# OPENSEARCH
+# OPENSEARCH SERVERLESS (desplegado en proyecto separado ml-inference-vectorsearch-aoss)
 ###############################################################################
-variable "opensearch_domain_name" {
-  description = "OpenSearch domain name for kNN vector store"
-  type        = string
-  default     = "hymmrec-vectors"
-}
-
 variable "opensearch_endpoint" {
-  description = "OpenSearch domain endpoint (set after first apply or use output)"
+  description = "OpenSearch Serverless collection endpoint (output del proyecto vectorsearch-aoss)"
   type        = string
   default     = ""
 }

@@ -1,13 +1,3 @@
-output "opensearch_endpoint" {
-  description = "OpenSearch domain endpoint for kNN vector queries"
-  value       = aws_opensearch_domain.hymmrec_vectors.endpoint
-}
-
-output "opensearch_domain_arn" {
-  description = "OpenSearch domain ARN"
-  value       = aws_opensearch_domain.hymmrec_vectors.arn
-}
-
 output "step_function_arn" {
   description = "Inference pipeline Step Function ARN"
   value       = module.aws_integration_workflow_inference_pipeline_step_function_layer_module.state_machine_arn

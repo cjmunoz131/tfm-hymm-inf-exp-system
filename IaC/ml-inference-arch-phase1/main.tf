@@ -393,17 +393,14 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
       ]
     },
     {
-      name   = "AllowOpenSearchAccess"
-      sid    = "AllowOpenSearchAccess"
+      name   = "AllowOpenSearchServerlessAccess"
+      sid    = "AllowOpenSearchServerlessAccess"
       effect = "Allow"
       actions = [
-        "es:ESHttpPost",
-        "es:ESHttpPut",
-        "es:ESHttpGet",
-        "es:ESHttpDelete"
+        "aoss:APIAccessAll"
       ]
       resources = [
-        "arn:aws:es:${local.region}:${local.account_id}:domain/${var.opensearch_domain_name}/*"
+        "arn:aws:aoss:${local.region}:${local.account_id}:collection/*"
       ]
     }
   ]
@@ -426,83 +423,6 @@ data "aws_iam_role" "sagemaker_endpoint_role" {
   name     = "${var.project}-sm-endpoint-iar-${terraform.workspace}"
 }
 
-
-###############################################################################
-# OPENSEARCH DOMAIN (kNN vector store for item embeddings)
-###############################################################################
-resource "aws_opensearch_domain" "hymmrec_vectors" {
-  provider    = aws.account1
-  domain_name = var.opensearch_domain_name
-
-  engine_version = "OpenSearch_2.11"
-
-  cluster_config {
-    instance_type          = "t3.medium.search"
-    instance_count         = 1
-    zone_awareness_enabled = false
-  }
-
-  ebs_options {
-    ebs_enabled = true
-    volume_type = "gp3"
-    volume_size = 20
-  }
-
-  encrypt_at_rest {
-    enabled    = true
-    kms_key_id = var.storage_kms_key_id
-  }
-
-  node_to_node_encryption {
-    enabled = true
-  }
-
-  domain_endpoint_options {
-    enforce_https       = true
-    tls_security_policy = "Policy-Min-TLS-1-2-2019-07"
-  }
-
-  vpc_options {
-    subnet_ids         = [var.private_subnet_ids[0]]
-    security_group_ids = [aws_security_group.sg_opensearch.id]
-  }
-
-  access_policies = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { AWS = "*" }
-      Action    = "es:*"
-      Resource  = "arn:aws:es:${local.region}:${local.account_id}:domain/${var.opensearch_domain_name}/*"
-    }]
-  })
-
-  tags = {
-    Project = var.project
-    Purpose = "knn-vector-store"
-  }
-}
-
-resource "aws_security_group" "sg_opensearch" {
-  provider    = aws.account1
-  name        = "${var.project}-inf-opensearch-sg-${terraform.workspace}"
-  description = "Security group for OpenSearch domain"
-  vpc_id      = var.vpc_id
-
-  ingress {
-    from_port       = 443
-    to_port         = 443
-    protocol        = "tcp"
-    security_groups = [aws_security_group.sg_glue.id, aws_security_group.sg_lambda.id]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
 
 ###############################################################################
 # STEP FUNCTION: Inference Pipeline Orchestration
