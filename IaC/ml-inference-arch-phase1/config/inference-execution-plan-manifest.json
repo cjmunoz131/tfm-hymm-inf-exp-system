@@ -16,7 +16,7 @@
     "processes": [
       {
         "process_cod": "PRCS-BATCH-TRANSFORM-ITEM-TOWER-001",
-        "flag_enabled": 1,
+        "flag_enabled": 0,
         "description": "Flujo de transformación en batch para obtención de embeddings del item tower",
         "task_groups": [
           {

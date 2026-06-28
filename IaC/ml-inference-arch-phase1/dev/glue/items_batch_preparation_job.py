@@ -37,19 +37,14 @@ import numpy as np
 # ============================================================
 # ARGUMENTOS
 # ============================================================
-# Glue Python Shell usa sys.argv directamente (no awsglue.utils en shell)
-def get_args():
-    """Parse Glue job arguments from sys.argv."""
-    args = {}
-    for i, arg in enumerate(sys.argv):
-        if arg.startswith('--') and i + 1 < len(sys.argv):
-            key = arg[2:]
-            value = sys.argv[i + 1]
-            if not value.startswith('--'):
-                args[key] = value
-    return args
+from awsglue.utils import getResolvedOptions
 
-args = get_args()
+args = getResolvedOptions(sys.argv, [
+    'gold_interactions_path',
+    'embeddings_catalog_path',
+    'output_path',
+    'aws_region',
+])
 
 JOB_NAME = args.get('JOB_NAME', 'items_batch_preparation_job')
 GOLD_INTERACTIONS_PATH = args['gold_interactions_path']
@@ -57,7 +52,7 @@ EMBEDDINGS_CATALOG_PATH = args['embeddings_catalog_path']
 OUTPUT_PATH = args['output_path']
 PIPELINE_ID = args.get('pipeline_id', 'UNKNOWN')
 CORRELATION_ID = args.get('correlation_id', 'UNKNOWN')
-REGION = args.get('aws_region', 'us-east-1')
+REGION = args['aws_region']
 
 # ============================================================
 # LOGGING
@@ -158,18 +153,36 @@ def write_jsonl_to_s3(records: list, s3_path: str):
 def extract_unique_items(df_gold: pd.DataFrame) -> pd.DataFrame:
     """
     Extrae los ítems únicos del Gold parquet con sus features.
-    Columns esperadas: movieId_idx, genres_multihot
+    Columns esperadas: movieId_idx, movieId (original), genres_multihot
+    Incluye movieId para que viaje como passthrough en el Batch Transform output.
     """
     logger.info("Extrayendo ítems únicos del Gold dataset...")
 
-    # Deduplicar por movieId_idx (cada item es único)
+    # Verificar columnas requeridas
     required_cols = ['movieId_idx', 'genres_multihot']
     for col in required_cols:
         if col not in df_gold.columns:
             raise ValueError(f"Columna requerida '{col}' no encontrada en Gold parquet. "
                              f"Columnas disponibles: {list(df_gold.columns)}")
 
-    df_items = df_gold[required_cols].drop_duplicates(subset=['movieId_idx']).reset_index(drop=True)
+    # Determinar nombre de columna movieId (puede ser movieId o movieid)
+    movie_id_col = None
+    for candidate in ['movieId', 'movieid', 'movie_id']:
+        if candidate in df_gold.columns:
+            movie_id_col = candidate
+            break
+
+    if movie_id_col is None:
+        raise ValueError(f"No se encontró columna movieId en Gold. "
+                         f"Columnas: {list(df_gold.columns)}")
+
+    select_cols = ['movieId_idx', movie_id_col, 'genres_multihot']
+    df_items = df_gold[select_cols].drop_duplicates(subset=['movieId_idx']).reset_index(drop=True)
+
+    # Normalizar nombre a 'movie_id'
+    if movie_id_col != 'movie_id':
+        df_items = df_items.rename(columns={movie_id_col: 'movie_id'})
+
     logger.info(f"  → Ítems únicos: {len(df_items):,}")
     return df_items
 
@@ -179,8 +192,11 @@ def build_batch_records(df_items: pd.DataFrame, embeddings_catalog: dict) -> lis
     Construye los registros JSONL para el Batch Transform del Item Tower.
     
     Hace JOIN entre:
-      - df_items: movieId_idx + genres_multihot (del Gold)
+      - df_items: movieId_idx + movie_id + genres_multihot (del Gold)
       - embeddings_catalog: {movieId_idx: {"text_emb": [...], "img_emb": [...]}}
+    
+    Incluye movie_id como passthrough para que el Batch Transform output
+    lo conserve y el indexador pueda hacer JOIN con Silver sin encoders.
     
     Solo incluye ítems que tengan embeddings disponibles.
     """
@@ -192,6 +208,7 @@ def build_batch_records(df_items: pd.DataFrame, embeddings_catalog: dict) -> lis
 
     for _, row in df_items.iterrows():
         item_idx = int(row['movieId_idx'])
+        movie_id = int(row['movie_id'])
 
         # Buscar embeddings
         emb_data = embeddings_catalog.get(item_idx)
@@ -211,7 +228,6 @@ def build_batch_records(df_items: pd.DataFrame, embeddings_catalog: dict) -> lis
         if isinstance(genres_multihot, np.ndarray):
             genres_multihot = genres_multihot.tolist()
         elif isinstance(genres_multihot, str):
-            # Si viene como string JSON desde parquet
             genres_multihot = json.loads(genres_multihot)
 
         if isinstance(text_emb, np.ndarray):
@@ -226,6 +242,7 @@ def build_batch_records(df_items: pd.DataFrame, embeddings_catalog: dict) -> lis
 
         record = {
             "item_idx": item_idx,
+            "movie_id": movie_id,
             "genres_multihot": genres_multihot,
             "text_emb": text_emb,
             "img_emb": img_emb

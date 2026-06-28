@@ -123,7 +123,7 @@ module "aws_integration_event_bus_event_bridge_scheduler_layer_module" {
   schedule_expression = var.event_bridge_scheduler_expression
   state               = "ENABLED"
   targets = [{
-    target_id     = "lambda-${var.project}-inf-${var.data_orchestrator_trigger_functionality}-${terraform.workspace}"
+    target_id     = "lambda-${var.project}-${var.data_orchestrator_trigger_functionality}-${terraform.workspace}"
     arn           = module.aws_app_compute_lambda_inference_orchestrator_trigger_layer_module.lambda_arn
     required_role = true
   }]
@@ -145,7 +145,7 @@ module "aws_app_compute_lambda_inference_orchestrator_trigger_layer_module" {
   subnets_ids               = var.private_subnet_ids
   security_group_ids        = [aws_security_group.sg_lambda.id]
   vpc_attach                = true
-  lambda_name               = "${var.project}-inf-${var.data_orchestrator_trigger_functionality}"
+  lambda_name               = "${var.project}-${var.data_orchestrator_trigger_functionality}"
   lambda_script             = ""
   lambda_runtime            = var.lambda_runtime
   description               = "Inference pipeline orchestrator trigger for ${var.project}"
@@ -247,7 +247,7 @@ module "aws_app_compute_lambda_update_inference_orchestration_status_layer_modul
 ###############################################################################
 data "aws_glue_connection" "existing_network_connection" {
   provider = aws.account1
-  id       = var.glue_network_connection_name
+  id       = "${local.account_id}:${var.glue_network_connection_name}"
 }
 
 ###############################################################################
@@ -269,7 +269,7 @@ module "aws_data_processing_job_glue_items_batch_preparation_layer_module" {
   max_capacity   = "1.0"
   max_retries    = 1
   execution_property = {
-    max_concurrent_runs = 1
+    max_concurrent_runs = 4
   }
   security_configuration = var.glue_security_configuration_name
   create_role            = true
@@ -281,12 +281,13 @@ module "aws_data_processing_job_glue_items_batch_preparation_layer_module" {
   add_iceberg_config           = false
   script_name = "items_batch_preparation_job"
   job_parameters = {
-    "--gold_interactions_path"  = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/interactions/feature_interactions.parquet"
-    "--embeddings_catalog_path" = "s3://${var.sagemaker_assets_bucket_name}/${var.project}/model_artefacts/embeddings/embeddings_catalog.pkl"
-    "--output_path"             = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-input/items_for_batch.jsonl"
-    "--aws_region"              = local.region
-    "--library-set"             = "analytics"
+    "--gold_interactions_path"  = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/interactions/feature_interactions.parquet",
+    "--embeddings_catalog_path" = "s3://${var.sagemaker_assets_bucket_name}/${var.project}/model_artefacts/embeddings/embeddings_catalog.pkl",
+    "--output_path"             = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-input/items_for_batch.jsonl",
+    "--aws_region"              = local.region,
+    "library-set"               = "analytics"
   }
+  add_modules = "boto3"
   keys = [
     var.storage_kms_key_id,
     "arn:aws:kms:${local.region}:${local.account_id}:alias/aws/glue"
@@ -332,8 +333,8 @@ module "aws_data_processing_job_glue_items_batch_preparation_layer_module" {
 }
 
 ###############################################################################
-# GLUE JOB 2: Items OpenSearch Indexing (Python Shell)
-# Lee Batch Transform output + Silver metadata → Bulk index OpenSearch kNN
+# GLUE JOB 2: Items OpenSearch Indexing (PySpark ETL)
+# Lee Batch Transform output + Silver Iceberg (Glue Catalog) → AOSS kNN index
 ###############################################################################
 module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
   providers = {
@@ -347,7 +348,8 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
   job_connections = [var.glue_network_connection_name]
   glue_version   = "4.0"
   timeout        = 2880
-  max_capacity   = "1.0"
+  number_of_workers = 2
+  worker_type       = "G.1X"
   max_retries    = 1
   execution_property = {
     max_concurrent_runs = 1
@@ -357,18 +359,35 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
   role_name              = format("%s-items-os-idx-glj-%s", var.project, terraform.workspace)
   bucket_deployment      = var.glue_assets_bucket_name
   repository_name        = var.glue_assets_repository_name
-  glue_access_databases_tables = {}
+  datalake_formats       = "iceberg"
+  glue_access_databases_tables = {
+    "source_silver_database" = {
+      database_name = var.silver_catalog_database_name
+      table_names   = ["*"]
+    }
+    "target_gold_database" = {
+      database_name = var.gold_catalog_database_name
+      table_names   = ["*"]
+    }
+  }
   aws_glue_connection_arn      = data.aws_glue_connection.existing_network_connection.arn
-  add_iceberg_config           = false
+  iceberg_datawarehouse_path   = "data/${var.movie_domain}/"
+  add_iceberg_config           = true
   script_name = "items_opensearch_indexing_job"
   job_parameters = {
-    "--batch_transform_output_path" = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-output/"
-    "--silver_movies_path"          = "s3://${var.silver_bucket_name}/data/${var.movie_domain}/cleansed_movies/"
-    "--encoders_path"               = "s3://${var.sagemaker_assets_bucket_name}/${var.project}/model_artefacts/encoders/encoders.pkl"
-    "--opensearch_endpoint"         = var.opensearch_endpoint
-    "--opensearch_index_name"       = var.opensearch_index_name
-    "--aws_region"                  = local.region
-    "--library-set"                 = "analytics"
+    "--enable-spark-ui"                 = "true"
+    "--enable-job-insights"             = "false"
+    "--spark-event-logs-path"           = "s3://${var.glue_assets_bucket_name}/sparkHistoryLogs/"
+    "--batch_transform_input_path"      = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-input/"
+    "--batch_transform_output_path"     = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-output/"
+    "--source_silver_database"          = var.silver_catalog_database_name
+    "--source_silver_movies_table"      = "cleansed_movies"
+    "--target_gold_database"            = var.gold_catalog_database_name
+    "--target_consolidated_table"       = "hymmrec_items_consolidated"
+    "--opensearch_host"                 = var.opensearch_endpoint
+    "--opensearch_index_name"           = var.opensearch_index_name
+    "--aws_region"                      = local.region
+    "--additional-python-modules"       = "opensearch-py==2.4.2,requests-aws4auth==1.2.3"
   }
   keys = [
     var.storage_kms_key_id,
@@ -376,18 +395,18 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
   ]
   additional_policies = [
     {
-      name   = "AllowS3ReadBatchOutputAndSilver"
-      sid    = "AllowS3ReadBatchOutputAndSilver"
+      name   = "AllowS3ReadGoldAndSilver"
+      sid    = "AllowS3ReadGoldAndSilver"
       effect = "Allow"
       actions = [
         "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
         "s3:ListBucket"
       ]
       resources = [
         "arn:aws:s3:::${var.gold_bucket_name}",
         "arn:aws:s3:::${var.gold_bucket_name}/*",
-        "arn:aws:s3:::${var.sagemaker_assets_bucket_name}",
-        "arn:aws:s3:::${var.sagemaker_assets_bucket_name}/*",
         "arn:aws:s3:::${var.silver_bucket_name}",
         "arn:aws:s3:::${var.silver_bucket_name}/*"
       ]
@@ -402,16 +421,36 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
       resources = [
         "arn:aws:aoss:${local.region}:${local.account_id}:collection/*"
       ]
-    }
+    },
+    {
+        name   = "AllowOpenSearchServerlessOperations"
+        sid    = "AllowAOSSDescribe"
+        effect = "Allow"
+        actions = [
+          "aoss:CreateCollection",
+          "aoss:ListCollections",
+          "aoss:BatchGetCollection",
+          "aoss:DeleteCollection",
+          "aoss:CreateAccessPolicy",
+          "aoss:ListAccessPolicies",
+          "aoss:UpdateAccessPolicy",
+          "aoss:CreateSecurityPolicy",
+          "aoss:GetSecurityPolicy",
+          "aoss:UpdateSecurityPolicy",
+          "iam:ListUsers",
+          "iam:ListRoles"
+        ]
+        resources = ["*"]
+      }
   ]
   command = {
-    name           = "pythonshell"
+    name           = "glueetl"
     script_path    = "${var.glue_assets_repository_name}/scripts"
-    python_version = "3.9"
+    python_version = "3"
   }
   main_source_path = "./${path.root}/dev/glue"
-  source_buckets   = [var.gold_bucket_name, var.sagemaker_assets_bucket_name, var.silver_bucket_name]
-  destiny_buckets  = []
+  source_buckets   = [var.gold_bucket_name, var.silver_bucket_name]
+  destiny_buckets  = [var.gold_bucket_name]
   sources_types    = ["s3"]
 }
 

@@ -29,7 +29,8 @@
       "sagemaker:CreateTransformJob",
       "sagemaker:DescribeTransformJob",
       "sagemaker:StopTransformJob",
-      "sagemaker:ListTags"
+      "sagemaker:ListTags",
+      "sagemaker:AddTags"
     ],
     "Resource": "arn:aws:sagemaker:${region}:${account_id}:transform-job/hymmrec-item-tower-bt-*"
   },

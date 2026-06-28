@@ -1,84 +1,75 @@
 """
-AWS Glue Python Shell Job: Enrich Items + Index to OpenSearch Serverless (AOSS)
+AWS Glue PySpark Job: Consolidate Items + Index to OpenSearch Serverless (AOSS)
 ================================================================================
-Lee el output del Batch Transform del Item Tower, lo enriquece con metadata
-legible de la capa Silver, y lo indexa en Amazon OpenSearch Serverless (AOSS)
-como vector store kNN (Faiss HNSW).
+Consolida los inputs del Item Tower con sus embeddings generados, enriquece con
+metadata de Silver, persiste como tabla Iceberg en Gold, e indexa en AOSS.
 
 Flujo:
-  1. Lee output del Batch Transform (JSONL con item_embedding 64D + attention_weights)
-  2. Lee metadata legible de Silver (cleansed_movies: título, géneros, sinopsis, año, poster)
-  3. Lee encoders.pkl para mapear movieId_idx → movieId original
-  4. JOIN: embedding + attention_weights + metadata legible
-  5. Construye documentos OpenSearch completos
-  6. Crea índice kNN si no existe (Faiss HNSW, cosinesimil, 64D)
-  7. Bulk index a OpenSearch Serverless
+  1. Lee BT input original (JSONL: item_idx, movie_id, genres_multihot, text_emb, img_emb)
+  2. Lee BT output (JSONL: item_embedding 64D + attention_weights)
+  3. JOIN por monotonic_id (BT mantiene orden línea a línea, SingleRecord)
+  4. Lee metadata de Silver (Iceberg: cleansed_movies via Glue Catalog)
+  5. JOIN consolidado + metadata → DataFrame final
+  6. Escribe tabla Iceberg hymmrec_items_consolidated en Gold (Glue Catalog)
+  7. Indexa en OpenSearch Serverless (AOSS) para kNN retrieval
 
-Schema del documento OpenSearch:
+Documento OpenSearch final (todo lo necesario para retrieval + reranking):
   {
-    "item_idx": int,
-    "movie_id": int,
-    "title": str,
-    "genres": str,
-    "synopsis": str,
-    "release_year": int,
-    "poster_path": str,
-    "director": str,
-    "item_embedding": [64D float],
-    "attention_weights": {"category": float, "text": float, "image": float},
-    "indexed_at": str (ISO timestamp)
+    "item_idx", "movie_id",
+    "genres_multihot", "text_emb", "img_emb",           # inputs item tower (reranking)
+    "item_embedding", "attention_weights",               # outputs item tower (kNN)
+    "title", "genres", "synopsis", "release_year",       # metadata (UI/explicabilidad)
+    "poster_path", "director", "indexed_at"
   }
 
-Argumentos Glue (--key value):
-  - JOB_NAME
-  - batch_transform_output_path: s3 path al output del Batch Transform (.jsonl.out)
-  - silver_movies_path:          s3 path al parquet de cleansed_movies en Silver
-  - encoders_path:               s3 path al encoders.pkl
-  - opensearch_endpoint:         endpoint de AOSS collection (sin https://)
-  - opensearch_index_name:       nombre del índice kNN
-  - pipeline_id
-  - correlation_id
-  - aws_region
+Argumentos Glue:
+  --JOB_NAME, --batch_transform_input_path, --batch_transform_output_path,
+  --source_silver_database, --source_silver_movies_table,
+  --target_gold_database, --target_consolidated_table,
+  --opensearch_host, --opensearch_index_name,
+  --pipeline_id, --correlation_id, --aws_region
 """
 
 import sys
 import json
 import logging
 import time
-import pickle
-import io
 from datetime import datetime, timezone
 
 import boto3
-import pandas as pd
-import numpy as np
-from botocore.exceptions import ClientError
+from pyspark.context import SparkContext
+from pyspark.sql import functions as F
+from pyspark.sql.window import Window
+from awsglue.context import GlueContext
+from awsglue.job import Job
+from awsglue.utils import getResolvedOptions
 
 # ============================================================
 # ARGUMENTOS
 # ============================================================
-def get_args():
-    """Parse Glue job arguments from sys.argv."""
-    args = {}
-    for i, arg in enumerate(sys.argv):
-        if arg.startswith('--') and i + 1 < len(sys.argv):
-            key = arg[2:]
-            value = sys.argv[i + 1]
-            if not value.startswith('--'):
-                args[key] = value
-    return args
+args = getResolvedOptions(sys.argv, [
+    'JOB_NAME',
+    'batch_transform_input_path',
+    'batch_transform_output_path',
+    'source_silver_database',
+    'source_silver_movies_table',
+    'target_gold_database',
+    'target_consolidated_table',
+    'opensearch_host',
+    'opensearch_index_name',
+    'pipeline_id',
+    'correlation_id',
+    'aws_region',
+])
 
-args = get_args()
-
-JOB_NAME = args.get('JOB_NAME', 'items_opensearch_indexing_job')
-BATCH_TRANSFORM_OUTPUT_PATH = args['batch_transform_output_path']
-SILVER_MOVIES_PATH = args['silver_movies_path']
-ENCODERS_PATH = args['encoders_path']
-OPENSEARCH_ENDPOINT = args['opensearch_endpoint']
-OPENSEARCH_INDEX_NAME = args.get('opensearch_index_name', 'hymmrec-items-vectors')
-PIPELINE_ID = args.get('pipeline_id', 'UNKNOWN')
-CORRELATION_ID = args.get('correlation_id', 'UNKNOWN')
-REGION = args.get('aws_region', 'us-east-1')
+# ============================================================
+# INICIALIZACIÓN SPARK + GLUE
+# ============================================================
+sc = SparkContext()
+glueContext = GlueContext(sc)
+spark = glueContext.spark_session
+job = Job(glueContext)
+job.init(args['JOB_NAME'], args)
 
 # ============================================================
 # LOGGING
@@ -90,497 +81,267 @@ handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - [%(funcNam
 logger.addHandler(handler)
 
 # ============================================================
-# CLIENTES AWS
-# ============================================================
-s3_client = boto3.client('s3', region_name=REGION)
-
-# OpenSearch usa requests con SigV4 signing
-from botocore.auth import SigV4Auth
-from botocore.awsrequest import AWSRequest
-from botocore.credentials import Credentials
-import urllib.request
-import urllib.error
-
-session = boto3.Session(region_name=REGION)
-credentials = session.get_credentials().get_frozen_credentials()
-
-# ============================================================
 # CONSTANTES
 # ============================================================
+REGION = args['aws_region']
+PIPELINE_ID = args['pipeline_id']
+CORRELATION_ID = args['correlation_id']
+BT_INPUT_PATH = args['batch_transform_input_path']
+BT_OUTPUT_PATH = args['batch_transform_output_path']
+SILVER_DATABASE = args['source_silver_database']
+SILVER_MOVIES_TABLE = args['source_silver_movies_table']
+GOLD_DATABASE = args['target_gold_database']
+CONSOLIDATED_TABLE = args['target_consolidated_table']
+OPENSEARCH_HOST = args['opensearch_host']
+OPENSEARCH_INDEX_NAME = args['opensearch_index_name']
+
 EMBEDDING_DIM = 64
-BULK_BATCH_SIZE = 500  # Documentos por bulk request
-
-# SigV4 service name: "aoss" para OpenSearch Serverless
-SIGV4_SERVICE = "aoss"
-
-# Mapping kNN para AOSS (Faiss engine, HNSW, cosinesimil)
-# AOSS gestiona shards y replicas internamente — no se configuran explícitamente
-OPENSEARCH_KNN_SETTINGS = {
-    "settings": {
-        "index": {
-            "knn": True,
-            "knn.algo_param.ef_search": 512
-        }
-    },
-    "mappings": {
-        "properties": {
-            "item_idx": {"type": "integer"},
-            "movie_id": {"type": "integer"},
-            "title": {"type": "text", "analyzer": "standard"},
-            "genres": {"type": "keyword"},
-            "synopsis": {"type": "text", "analyzer": "standard"},
-            "release_year": {"type": "integer"},
-            "poster_path": {"type": "keyword"},
-            "director": {"type": "keyword"},
-            "item_embedding": {
-                "type": "knn_vector",
-                "dimension": EMBEDDING_DIM,
-                "method": {
-                    "name": "hnsw",
-                    "space_type": "cosinesimil",
-                    "parameters": {
-                        "ef_construction": 512,
-                        "m": 16
-                    }
-                }
-            },
-            "attention_weights": {
-                "type": "object",
-                "properties": {
-                    "category": {"type": "float"},
-                    "text": {"type": "float"},
-                    "image": {"type": "float"}
-                }
-            },
-            "indexed_at": {"type": "date"}
-        }
-    }
-}
+BULK_BATCH_SIZE = 500
 
 
 # ============================================================
-# FUNCIONES UTILITARIAS S3
+# LECTURA DE DATOS
 # ============================================================
-def parse_s3_path(s3_path: str) -> tuple:
-    """Parsea s3://bucket/prefix en (bucket, prefix)."""
-    path = s3_path.replace("s3://", "")
-    parts = path.split("/", 1)
-    return parts[0], parts[1] if len(parts) > 1 else ""
-
-
-def read_jsonl_from_s3(s3_path: str) -> list:
-    """
-    Lee JSONL desde S3. Soporta archivos individuales y directorios
-    (Batch Transform genera archivos .out en un directorio).
-    """
-    bucket, prefix = parse_s3_path(s3_path)
-    logger.info(f"Leyendo JSONL desde: s3://{bucket}/{prefix}")
-
-    # Listar archivos en el path
-    paginator = s3_client.get_paginator('list_objects_v2')
-    files = []
-
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            key = obj['Key']
-            # Batch Transform genera .out files
-            if key.endswith('.out') or key.endswith('.jsonl') or key.endswith('.json'):
-                files.append(key)
-
-    # Si no encontramos archivos con extensión conocida, intentar el prefix directo
-    if not files:
-        files = [prefix]
-
-    records = []
-    for f in files:
-        try:
-            obj = s3_client.get_object(Bucket=bucket, Key=f)
-            content = obj['Body'].read().decode('utf-8')
-            for line in content.strip().split('\n'):
-                line = line.strip()
-                if line:
-                    records.append(json.loads(line))
-        except Exception as e:
-            logger.warning(f"Error leyendo {f}: {e}")
-
-    logger.info(f"  → Registros leídos: {len(records):,}")
-    return records
-
-
-def read_parquet_from_s3(s3_path: str) -> pd.DataFrame:
-    """Lee parquet desde S3 (soporta directorios particionados)."""
-    bucket, prefix = parse_s3_path(s3_path)
-    logger.info(f"Leyendo parquet desde: s3://{bucket}/{prefix}")
-
-    paginator = s3_client.get_paginator('list_objects_v2')
-    parquet_files = []
-
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get('Contents', []):
-            key = obj['Key']
-            if key.endswith('.parquet') or key.endswith('.snappy.parquet'):
-                parquet_files.append(key)
-
-    if not parquet_files:
-        parquet_files = [prefix]
-
-    dfs = []
-    for pf in parquet_files:
-        obj = s3_client.get_object(Bucket=bucket, Key=pf)
-        df_part = pd.read_parquet(io.BytesIO(obj['Body'].read()))
-        dfs.append(df_part)
-
-    df = pd.concat(dfs, ignore_index=True) if len(dfs) > 1 else dfs[0]
-    logger.info(f"  → Registros leídos: {len(df):,}")
+def read_batch_transform_input():
+    """Lee el JSONL input original del Batch Transform (con item_idx, movie_id, features)."""
+    logger.info(f"Leyendo BT input desde: {BT_INPUT_PATH}")
+    df = spark.read.json(BT_INPUT_PATH)
+    # Agregar índice monotónico para JOIN posicional con el output
+    df = df.withColumn("_row_idx", F.monotonically_increasing_id())
+    logger.info(f"  → Registros: {df.count():,} | Columnas: {df.columns}")
     return df
 
 
-def read_pickle_from_s3(s3_path: str):
-    """Lee un archivo pickle desde S3."""
-    bucket, prefix = parse_s3_path(s3_path)
-    logger.info(f"Leyendo pickle desde: s3://{bucket}/{prefix}")
+def read_batch_transform_output():
+    """Lee el JSONL output del Batch Transform (item_embedding + attention_weights)."""
+    logger.info(f"Leyendo BT output desde: {BT_OUTPUT_PATH}")
+    df = spark.read.json(BT_OUTPUT_PATH)
+    df = df.withColumn("_row_idx", F.monotonically_increasing_id())
+    logger.info(f"  → Registros: {df.count():,} | Columnas: {df.columns}")
+    return df
 
-    obj = s3_client.get_object(Bucket=bucket, Key=prefix)
-    data = pickle.loads(obj['Body'].read())
-    logger.info(f"  → Tipo: {type(data).__name__}")
-    return data
+
+def read_silver_movies():
+    """Lee cleansed_movies desde Glue Catalog (tabla Iceberg en Silver)."""
+    logger.info(f"Leyendo Silver: {SILVER_DATABASE}.{SILVER_MOVIES_TABLE}")
+    full_table = f"glue_catalog.{SILVER_DATABASE}.{SILVER_MOVIES_TABLE}"
+    df = spark.sql(f"SELECT * FROM {full_table}")
+    logger.info(f"  → Registros: {df.count():,}")
+    return df
 
 
 # ============================================================
-# FUNCIONES OPENSEARCH (SigV4 signed requests)
+# CONSOLIDACIÓN
 # ============================================================
-def _sign_request(method: str, url: str, body: str = None, headers: dict = None) -> dict:
-    """Firma una request HTTP con SigV4 para OpenSearch Serverless (AOSS)."""
-    if headers is None:
-        headers = {'Content-Type': 'application/json'}
-
-    request = AWSRequest(method=method, url=url, data=body, headers=headers)
-    SigV4Auth(credentials, SIGV4_SERVICE, REGION).add_auth(request)
-    return dict(request.headers)
-
-
-def opensearch_request(method: str, path: str, body: dict = None) -> dict:
-    """Ejecuta una request HTTP firmada contra OpenSearch Serverless."""
-    url = f"https://{OPENSEARCH_ENDPOINT}/{path}"
-    body_str = json.dumps(body) if body else None
-
-    signed_headers = _sign_request(method, url, body_str)
-
-    req = urllib.request.Request(
-        url=url,
-        data=body_str.encode('utf-8') if body_str else None,
-        headers=signed_headers,
-        method=method
-    )
-
-    try:
-        with urllib.request.urlopen(req) as response:
-            response_body = response.read().decode('utf-8')
-            if not response_body:
-                return {"status": response.status}
-            return json.loads(response_body)
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8') if e.readable() else ''
-        logger.error(f"OpenSearch {method} {path} → {e.code}: {error_body}")
-        raise
-
-
-def opensearch_bulk_request(path: str, bulk_body: str) -> dict:
-    """Ejecuta un bulk request firmado contra OpenSearch Serverless."""
-    url = f"https://{OPENSEARCH_ENDPOINT}/{path}"
-    headers = {'Content-Type': 'application/x-ndjson'}
-
-    signed_headers = _sign_request('POST', url, bulk_body, headers)
-
-    req = urllib.request.Request(
-        url=url,
-        data=bulk_body.encode('utf-8'),
-        headers=signed_headers,
-        method='POST'
-    )
-
-    try:
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode('utf-8'))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode('utf-8') if e.readable() else ''
-        logger.error(f"OpenSearch BULK → {e.code}: {error_body}")
-        raise
-
-
-def ensure_index_exists():
+def consolidate_items(df_input, df_output, df_silver):
     """
-    Crea el índice kNN en AOSS si no existe.
+    JOIN posicional entre BT input y output, luego enriquece con Silver metadata.
     
-    En OpenSearch Serverless NO se puede eliminar un índice vía API (a diferencia
-    de managed). La estrategia de refresh es idempotente: usamos _id por item_idx,
-    así cada ejecución sobrescribe documentos existentes sin duplicar.
+    BT SingleRecord mantiene orden → _row_idx permite JOIN sin key compartida.
     """
-    logger.info(f"Verificando/creando índice: {OPENSEARCH_INDEX_NAME}")
+    logger.info("Consolidando BT input + output + Silver metadata...")
 
-    # Verificar si el índice ya existe
-    try:
-        opensearch_request('HEAD', OPENSEARCH_INDEX_NAME)
-        logger.info(f"  → Índice ya existe, se usará upsert por _id (idempotente)")
-        return
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            logger.info(f"  → Índice no existe, creando...")
-        else:
-            raise
+    # JOIN input + output por posición
+    df_bt = df_input.join(df_output, on="_row_idx", how="inner").drop("_row_idx")
+    logger.info(f"  → Tras JOIN input+output: {df_bt.count():,}")
 
-    # Crear índice con mappings kNN (Faiss HNSW)
-    result = opensearch_request('PUT', OPENSEARCH_INDEX_NAME, OPENSEARCH_KNN_SETTINGS)
-    logger.info(f"  → Índice creado: {result.get('acknowledged', False)}")
+    # Preparar Silver para JOIN por movieId
+    # Seleccionar columnas relevantes y renombrar para evitar conflictos
+    silver_cols = df_silver.columns
+    movie_id_col = "movieId" if "movieId" in silver_cols else "movie_id"
 
+    df_meta = df_silver.select(
+        F.col(movie_id_col).cast("int").alias("_silver_movie_id"),
+        F.col("titulo").alias("title") if "titulo" in silver_cols else F.col("title").alias("title"),
+        F.col("generos").alias("genres_text") if "generos" in silver_cols else F.col("genres").alias("genres_text"),
+        F.col("sinopsis").alias("synopsis") if "sinopsis" in silver_cols else F.col("synopsis").alias("synopsis"),
+        F.col("fecha_lanzamiento").alias("release_date") if "fecha_lanzamiento" in silver_cols else F.col("release_date").alias("release_date"),
+        F.col("poster_path"),
+        F.col("director") if "director" in silver_cols else F.lit(""),
+    ).dropDuplicates(["_silver_movie_id"])
 
-def bulk_index_documents(documents: list):
-    """
-    Indexa documentos en OpenSearch usando bulk API.
-    Procesa en batches de BULK_BATCH_SIZE para evitar timeouts.
-    """
-    logger.info(f"Indexando {len(documents):,} documentos en batches de {BULK_BATCH_SIZE}...")
+    # JOIN con Silver
+    df_consolidated = df_bt.join(
+        df_meta,
+        df_bt["movie_id"].cast("int") == df_meta["_silver_movie_id"],
+        how="left"
+    ).drop("_silver_movie_id")
 
-    total_indexed = 0
-    total_errors = 0
+    # Extraer año
+    df_consolidated = df_consolidated.withColumn(
+        "release_year",
+        F.when(F.col("release_date").isNotNull(),
+               F.substring(F.col("release_date").cast("string"), 1, 4).cast("int")
+        ).otherwise(0)
+    ).drop("release_date")
 
-    for i in range(0, len(documents), BULK_BATCH_SIZE):
-        batch = documents[i:i + BULK_BATCH_SIZE]
-
-        # Construir bulk body (NDJSON)
-        lines = []
-        for doc in batch:
-            action = {"index": {"_index": OPENSEARCH_INDEX_NAME, "_id": str(doc['item_idx'])}}
-            lines.append(json.dumps(action))
-            lines.append(json.dumps(doc))
-
-        bulk_body = '\n'.join(lines) + '\n'
-
-        # Ejecutar bulk
-        try:
-            result = opensearch_bulk_request('_bulk', bulk_body)
-            errors = result.get('errors', False)
-            if errors:
-                error_items = [item for item in result.get('items', [])
-                               if 'error' in item.get('index', {})]
-                total_errors += len(error_items)
-                if error_items:
-                    logger.warning(f"  Batch {i // BULK_BATCH_SIZE + 1}: {len(error_items)} errores")
-                    logger.warning(f"  Ejemplo: {error_items[0]}")
-            total_indexed += len(batch) - (len(error_items) if errors else 0)
-        except Exception as e:
-            logger.error(f"  Error en batch {i // BULK_BATCH_SIZE + 1}: {e}")
-            total_errors += len(batch)
-
-        # Log progreso cada 5 batches
-        if (i // BULK_BATCH_SIZE + 1) % 5 == 0:
-            logger.info(f"  Progreso: {min(i + BULK_BATCH_SIZE, len(documents)):,}/{len(documents):,}")
-
-    logger.info(f"  → Total indexados: {total_indexed:,} | Errores: {total_errors:,}")
-    return total_indexed, total_errors
-
-
-# ============================================================
-# LÓGICA DE ENRIQUECIMIENTO
-# ============================================================
-def build_idx_to_movieid_map(encoders: dict) -> dict:
-    """
-    Extrae el mapeo inverso movieId_idx → movieId desde los encoders.
-    Los encoders contienen un LabelEncoder que mapea movieId → movieId_idx.
-    """
-    logger.info("Construyendo mapeo idx → movieId desde encoders...")
-
-    # El encoder de movies suele estar en 'movieId_encoder' o 'movie_encoder'
-    movie_encoder = None
-    for key in ['movieId_encoder', 'movie_encoder', 'item_encoder']:
-        if key in encoders:
-            movie_encoder = encoders[key]
-            break
-
-    if movie_encoder is None:
-        # Intentar con la key directa 'movieId' si es un dict de mappings
-        if 'movieId' in encoders:
-            movie_encoder = encoders['movieId']
-
-    if movie_encoder is None:
-        logger.warning(f"Keys disponibles en encoders: {list(encoders.keys())}")
-        raise ValueError("No se encontró el encoder de movieId en encoders.pkl. "
-                         "Keys esperadas: movieId_encoder, movie_encoder, item_encoder")
-
-    # Si es un LabelEncoder de sklearn
-    if hasattr(movie_encoder, 'classes_'):
-        idx_to_movieid = {idx: int(mid) for idx, mid in enumerate(movie_encoder.classes_)}
-    # Si es un dict {movieId: idx}
-    elif isinstance(movie_encoder, dict):
-        idx_to_movieid = {v: k for k, v in movie_encoder.items()}
-    else:
-        raise ValueError(f"Tipo de encoder no soportado: {type(movie_encoder)}")
-
-    logger.info(f"  → Mapeos construidos: {len(idx_to_movieid):,}")
-    return idx_to_movieid
-
-
-def enrich_with_metadata(
-    batch_output: list,
-    df_silver_movies: pd.DataFrame,
-    idx_to_movieid: dict
-) -> list:
-    """
-    Enriquece el output del Batch Transform con metadata legible de Silver.
-    
-    Args:
-        batch_output: Lista de dicts del Batch Transform output
-                      {item_embedding: [...], attention_weights: {...}}
-        df_silver_movies: DataFrame de cleansed_movies
-        idx_to_movieid: Mapeo movieId_idx → movieId
-    
-    Returns:
-        Lista de documentos OpenSearch completos
-    """
-    logger.info("Enriqueciendo embeddings con metadata de Silver...")
-
-    # Crear lookup de metadata por movieId
-    metadata_lookup = {}
-    for _, row in df_silver_movies.iterrows():
-        mid = int(row.get('movieId', 0))
-        metadata_lookup[mid] = {
-            'title': str(row.get('titulo', row.get('title', ''))),
-            'genres': str(row.get('generos', row.get('genres', ''))),
-            'synopsis': str(row.get('sinopsis', row.get('synopsis', row.get('overview', ''))))[:1000],
-            'release_year': _extract_year(row.get('fecha_lanzamiento', row.get('release_date', ''))),
-            'poster_path': str(row.get('poster_path', '')),
-            'director': str(row.get('director', '')),
-        }
-
-    documents = []
-    items_sin_metadata = 0
+    # Agregar timestamp de indexación
     now_iso = datetime.now(timezone.utc).isoformat()
+    df_consolidated = df_consolidated.withColumn("indexed_at", F.lit(now_iso))
 
-    for record in batch_output:
-        item_idx = record.get('item_idx')
-        item_embedding = record.get('item_embedding')
-        attention_weights = record.get('attention_weights', {})
-
-        if item_idx is None or item_embedding is None:
-            continue
-
-        item_idx = int(item_idx)
-
-        # Mapear idx → movieId
-        movie_id = idx_to_movieid.get(item_idx)
-        if movie_id is None:
-            items_sin_metadata += 1
-            continue
-
-        # Obtener metadata
-        meta = metadata_lookup.get(movie_id, {})
-        if not meta:
-            items_sin_metadata += 1
-            # Aún así indexamos con metadata vacía (el embedding es lo importante)
-            meta = {'title': '', 'genres': '', 'synopsis': '',
-                    'release_year': 0, 'poster_path': '', 'director': ''}
-
-        # Construir documento OpenSearch
-        doc = {
-            'item_idx': item_idx,
-            'movie_id': movie_id,
-            'title': meta['title'],
-            'genres': meta['genres'],
-            'synopsis': meta['synopsis'],
-            'release_year': meta['release_year'],
-            'poster_path': meta['poster_path'],
-            'director': meta['director'],
-            'item_embedding': item_embedding,
-            'attention_weights': attention_weights,
-            'indexed_at': now_iso
-        }
-        documents.append(doc)
-
-    logger.info(f"  → Documentos enriquecidos: {len(documents):,}")
-    logger.info(f"  → Ítems sin metadata Silver: {items_sin_metadata:,}")
-
-    return documents
-
-
-def _extract_year(date_value) -> int:
-    """Extrae el año de una fecha (string o datetime)."""
-    if pd.isna(date_value) or date_value is None or date_value == '':
-        return 0
-    try:
-        if isinstance(date_value, str):
-            return int(date_value[:4])
-        elif hasattr(date_value, 'year'):
-            return int(date_value.year)
-    except (ValueError, TypeError):
-        pass
-    return 0
+    logger.info(f"  → Consolidado final: {df_consolidated.count():,} documentos")
+    return df_consolidated
 
 
 # ============================================================
-# PUNTO DE ENTRADA PRINCIPAL
+# PERSISTENCIA EN GOLD (Iceberg)
+# ============================================================
+def write_consolidated_to_gold(df_consolidated):
+    """Escribe la tabla consolidada como Iceberg en Gold (Glue Catalog)."""
+    full_table = f"glue_catalog.{GOLD_DATABASE}.{CONSOLIDATED_TABLE}"
+    logger.info(f"Escribiendo tabla Iceberg: {full_table}")
+
+    # Registrar como vista temporal
+    df_consolidated.createOrReplaceTempView("tmp_consolidated")
+
+    # CREATE TABLE IF NOT EXISTS + INSERT OVERWRITE (idempotente)
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {full_table}
+        USING iceberg
+        AS SELECT * FROM tmp_consolidated WHERE 1=0
+    """)
+
+    spark.sql(f"""
+        INSERT OVERWRITE {full_table}
+        SELECT * FROM tmp_consolidated
+    """)
+
+    count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_table}").collect()[0]['cnt']
+    logger.info(f"  → Tabla {full_table}: {count:,} registros escritos")
+
+
+# ============================================================
+# OPENSEARCH SERVERLESS (opensearch-py + SigV4)
+# ============================================================
+def create_opensearch_client():
+    """Crea cliente OpenSearch con SigV4 auth para AOSS."""
+    from opensearchpy import OpenSearch, RequestsHttpConnection
+    from requests_aws4auth import AWS4Auth
+
+    credentials = boto3.Session(region_name=REGION).get_credentials()
+    awsauth = AWS4Auth(
+        credentials.access_key, credentials.secret_key,
+        REGION, "aoss", session_token=credentials.token
+    )
+    return OpenSearch(
+        hosts=[{"host": OPENSEARCH_HOST, "port": 443}],
+        http_auth=awsauth,
+        use_ssl=True,
+        verify_certs=True,
+        connection_class=RequestsHttpConnection,
+        timeout=300
+    )
+
+
+def ensure_index_exists(client):
+    """Crea el índice kNN en AOSS si no existe."""
+    logger.info(f"Verificando índice: {OPENSEARCH_INDEX_NAME}")
+    if client.indices.exists(index=OPENSEARCH_INDEX_NAME):
+        logger.info("  → Índice existe, upsert por _id")
+        return
+
+    logger.info("  → Creando índice kNN...")
+    index_body = {
+        "settings": {"index": {"knn": True, "knn.algo_param.ef_search": 512}},
+        "mappings": {
+            "properties": {
+                "item_idx": {"type": "integer"},
+                "movie_id": {"type": "integer"},
+                "genres_multihot": {"type": "float"},
+                "text_emb": {"type": "float"},
+                "img_emb": {"type": "float"},
+                "item_embedding": {
+                    "type": "knn_vector",
+                    "dimension": EMBEDDING_DIM,
+                    "method": {"name": "hnsw", "space_type": "cosinesimil",
+                               "parameters": {"ef_construction": 512, "m": 16}}
+                },
+                "attention_weights": {"type": "object", "properties": {
+                    "category": {"type": "float"}, "text": {"type": "float"}, "image": {"type": "float"}
+                }},
+                "title": {"type": "text"}, "genres_text": {"type": "keyword"},
+                "synopsis": {"type": "text"}, "release_year": {"type": "integer"},
+                "poster_path": {"type": "keyword"}, "director": {"type": "keyword"},
+                "indexed_at": {"type": "date"}
+            }
+        }
+    }
+    result = client.indices.create(index=OPENSEARCH_INDEX_NAME, body=index_body)
+    logger.info(f"  → Creado: {result.get('acknowledged')}")
+
+
+def bulk_index_documents(client, documents: list) -> tuple:
+    """Bulk index a AOSS con upsert por _id = item_idx."""
+    from opensearchpy.helpers import bulk
+
+    logger.info(f"Indexando {len(documents):,} documentos...")
+    actions = [{"_index": OPENSEARCH_INDEX_NAME, "_id": str(d['item_idx']), "_source": d} for d in documents]
+
+    total_ok, total_err = 0, 0
+    for i in range(0, len(actions), BULK_BATCH_SIZE):
+        batch = actions[i:i + BULK_BATCH_SIZE]
+        try:
+            ok, errors = bulk(client, batch, raise_on_error=False)
+            total_ok += ok
+            total_err += len(errors) if isinstance(errors, list) else 0
+        except Exception as e:
+            logger.error(f"  Batch {i // BULK_BATCH_SIZE + 1} error: {e}")
+            total_err += len(batch)
+
+    logger.info(f"  → OK: {total_ok:,} | Errores: {total_err:,}")
+    return total_ok, total_err
+
+
+# ============================================================
+# MAIN
 # ============================================================
 def main():
     inicio = time.time()
     logger.info(f"{'='*60}")
-    logger.info(f"Job: {JOB_NAME}")
-    logger.info(f"Pipeline ID: {PIPELINE_ID}")
-    logger.info(f"Correlation ID: {CORRELATION_ID}")
-    logger.info(f"OpenSearch Endpoint: {OPENSEARCH_ENDPOINT}")
-    logger.info(f"OpenSearch Index: {OPENSEARCH_INDEX_NAME}")
+    logger.info(f"Job: {args['JOB_NAME']} | Pipeline: {PIPELINE_ID}")
     logger.info(f"{'='*60}")
 
-    # 1. LEER OUTPUT DEL BATCH TRANSFORM
-    logger.info("\n[PASO 1/5] Leyendo output del Batch Transform...")
-    batch_output = read_jsonl_from_s3(BATCH_TRANSFORM_OUTPUT_PATH)
+    # 1. LEER BT INPUT + OUTPUT
+    logger.info("\n[PASO 1/5] Leyendo Batch Transform input y output...")
+    df_input = read_batch_transform_input()
+    df_output = read_batch_transform_output()
 
-    if not batch_output:
-        raise RuntimeError(f"No se encontraron registros en: {BATCH_TRANSFORM_OUTPUT_PATH}")
+    # 2. LEER SILVER
+    logger.info("\n[PASO 2/5] Leyendo Silver metadata...")
+    df_silver = read_silver_movies()
 
-    logger.info(f"  Ejemplo primer registro (keys): {list(batch_output[0].keys())}")
+    # 3. CONSOLIDAR
+    logger.info("\n[PASO 3/5] Consolidando datos...")
+    df_consolidated = consolidate_items(df_input, df_output, df_silver)
 
-    # 2. LEER METADATA DE SILVER
-    logger.info("\n[PASO 2/5] Leyendo metadata de Silver (cleansed_movies)...")
-    df_silver_movies = read_parquet_from_s3(SILVER_MOVIES_PATH)
-    logger.info(f"  Columnas Silver: {list(df_silver_movies.columns)}")
-
-    # 3. LEER ENCODERS (para mapeo idx → movieId)
-    logger.info("\n[PASO 3/5] Leyendo encoders.pkl...")
-    encoders = read_pickle_from_s3(ENCODERS_PATH)
-    idx_to_movieid = build_idx_to_movieid_map(encoders)
-
-    # 4. ENRIQUECER DOCUMENTOS
-    logger.info("\n[PASO 4/5] Enriqueciendo documentos con metadata...")
-    documents = enrich_with_metadata(batch_output, df_silver_movies, idx_to_movieid)
-
-    if not documents:
-        raise RuntimeError("No se generaron documentos enriquecidos. "
-                           "Verificar consistencia entre Batch Transform output, "
-                           "encoders y Silver movies.")
+    # 4. PERSISTIR EN GOLD (Iceberg)
+    logger.info("\n[PASO 4/5] Escribiendo tabla Iceberg en Gold...")
+    write_consolidated_to_gold(df_consolidated)
 
     # 5. INDEXAR EN OPENSEARCH
-    logger.info("\n[PASO 5/5] Indexando en OpenSearch...")
-    ensure_index_exists()
-    total_indexed, total_errors = bulk_index_documents(documents)
+    logger.info("\n[PASO 5/5] Indexando en OpenSearch Serverless...")
+    documents = [row.asDict(recursive=True) for row in df_consolidated.collect()]
+    os_client = create_opensearch_client()
+    ensure_index_exists(os_client)
+    total_ok, total_err = bulk_index_documents(os_client, documents)
 
     # RESUMEN
-    duracion = round(time.time() - inicio, 2)
+    dur = round(time.time() - inicio, 2)
     logger.info(f"\n{'='*60}")
-    logger.info(f"Job completado exitosamente en {duracion}s")
-    logger.info(f"  Documentos indexados: {total_indexed:,}")
-    logger.info(f"  Errores: {total_errors:,}")
-    logger.info(f"  Índice: {OPENSEARCH_INDEX_NAME}")
+    logger.info(f"Completado en {dur}s | Indexados: {total_ok:,} | Errores: {total_err:,}")
     logger.info(f"{'='*60}")
 
-    if total_errors > 0 and total_indexed == 0:
-        raise RuntimeError(f"Indexación falló completamente: {total_errors} errores, 0 indexados")
+    if total_err > 0 and total_ok == 0:
+        raise RuntimeError(f"Indexación falló: {total_err} errores")
 
 
 # ============================================================
 # EJECUCIÓN
 # ============================================================
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        logger.error(f"Job FALLÓ: {e}")
-        raise
+try:
+    main()
+except Exception as e:
+    logger.error(f"Job FALLÓ: {e}")
+    raise
+finally:
+    job.commit()

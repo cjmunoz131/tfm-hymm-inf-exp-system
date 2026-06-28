@@ -95,7 +95,7 @@ variable "event_bridge_scheduler_expression" {
 
 variable "data_orchestrator_trigger_functionality" {
   type    = string
-  default = "inf-orch-trigger"
+  default = "inf-data-orch-trigger"
 }
 
 ###############################################################################
@@ -180,13 +180,25 @@ variable "movie_domain" {
   default     = "obt_movie_affinity"
 }
 
+variable "silver_catalog_database_name" {
+  type        = string
+  description = "Glue Catalog database name for Silver layer (Iceberg tables)"
+  default     = "hymmrec_tfm_obt_movie_affinity_silver"
+}
+
+variable "gold_catalog_database_name" {
+  type        = string
+  description = "Glue Catalog database name for Gold layer (ML Feature Store)"
+  default     = "hymmrec_tfm_ml_feature_store_gold"
+}
+
 ###############################################################################
 # SAGEMAKER - Item Tower Model (creado en ml-arch-cd-phase2)
 ###############################################################################
 variable "item_tower_model_name" {
   description = "Nombre del modelo SageMaker del Item Tower (creado en ml-arch-cd-phase2)"
   type        = string
-  default     = "item-tower"
+  default     = "hymmrec-item-tower-sm-model-dev"
 }
 
 ###############################################################################
@@ -195,7 +207,7 @@ variable "item_tower_model_name" {
 variable "opensearch_endpoint" {
   description = "OpenSearch Serverless collection endpoint (output del proyecto vectorsearch-aoss)"
   type        = string
-  default     = ""
+  default     = "https://f3cprbwt2yb9t7xvm84a.aoss.us-east-1.on.aws"
 }
 
 variable "opensearch_index_name" {
