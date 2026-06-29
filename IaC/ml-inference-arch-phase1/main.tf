@@ -387,7 +387,7 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
     "--opensearch_host"                 = var.opensearch_endpoint
     "--opensearch_index_name"           = var.opensearch_index_name
     "--aws_region"                      = local.region
-    "--additional-python-modules"       = "opensearch-py==2.4.2,requests-aws4auth==1.2.3"
+    "--additional-python-modules"       = "urllib3==1.26.18,opensearch-py==2.4.2,requests-aws4auth==1.2.3"
   }
   keys = [
     var.storage_kms_key_id,

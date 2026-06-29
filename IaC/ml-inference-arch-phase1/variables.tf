@@ -207,7 +207,7 @@ variable "item_tower_model_name" {
 variable "opensearch_endpoint" {
   description = "OpenSearch Serverless collection endpoint (output del proyecto vectorsearch-aoss)"
   type        = string
-  default     = "https://f3cprbwt2yb9t7xvm84a.aoss.us-east-1.on.aws"
+  default     = "f3cprbwt2yb9t7xvm84a.aoss.us-east-1.on.aws"
 }
 
 variable "opensearch_index_name" {

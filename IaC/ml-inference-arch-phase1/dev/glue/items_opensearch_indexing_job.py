@@ -39,7 +39,6 @@ from datetime import datetime, timezone
 import boto3
 from pyspark.context import SparkContext
 from pyspark.sql import functions as F
-from pyspark.sql.window import Window
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from awsglue.utils import getResolvedOptions
@@ -95,7 +94,7 @@ CONSOLIDATED_TABLE = args['target_consolidated_table']
 OPENSEARCH_HOST = args['opensearch_host']
 OPENSEARCH_INDEX_NAME = args['opensearch_index_name']
 
-EMBEDDING_DIM = 64
+EMBEDDING_DIM = 128  # Verificar con model_metadata.json del modelo ganador
 BULK_BATCH_SIZE = 500
 
 
@@ -103,11 +102,9 @@ BULK_BATCH_SIZE = 500
 # LECTURA DE DATOS
 # ============================================================
 def read_batch_transform_input():
-    """Lee el JSONL input original del Batch Transform (con item_idx, movie_id, features)."""
+    """Lee el JSONL input original del Batch Transform (con features: genres_multihot, text_emb, img_emb)."""
     logger.info(f"Leyendo BT input desde: {BT_INPUT_PATH}")
     df = spark.read.json(BT_INPUT_PATH)
-    # Agregar índice monotónico para JOIN posicional con el output
-    df = df.withColumn("_row_idx", F.monotonically_increasing_id())
     logger.info(f"  → Registros: {df.count():,} | Columnas: {df.columns}")
     return df
 
@@ -116,7 +113,6 @@ def read_batch_transform_output():
     """Lee el JSONL output del Batch Transform (item_embedding + attention_weights)."""
     logger.info(f"Leyendo BT output desde: {BT_OUTPUT_PATH}")
     df = spark.read.json(BT_OUTPUT_PATH)
-    df = df.withColumn("_row_idx", F.monotonically_increasing_id())
     logger.info(f"  → Registros: {df.count():,} | Columnas: {df.columns}")
     return df
 
@@ -135,18 +131,20 @@ def read_silver_movies():
 # ============================================================
 def consolidate_items(df_input, df_output, df_silver):
     """
-    JOIN posicional entre BT input y output, luego enriquece con Silver metadata.
-    
-    BT SingleRecord mantiene orden → _row_idx permite JOIN sin key compartida.
+    JOIN por item_idx entre BT input (features) y BT output (embeddings),
+    luego enriquece con Silver metadata por movie_id.
     """
     logger.info("Consolidando BT input + output + Silver metadata...")
 
-    # JOIN input + output por posición
-    df_bt = df_input.join(df_output, on="_row_idx", how="inner").drop("_row_idx")
-    logger.info(f"  → Tras JOIN input+output: {df_bt.count():,}")
+    # JOIN input + output por item_idx (key determinística del passthrough)
+    df_bt = df_output.join(
+        df_input.select("item_idx", "genres_multihot", "text_emb", "img_emb"),
+        on="item_idx",
+        how="inner"
+    )
+    logger.info(f"  → Tras JOIN input+output por item_idx: {df_bt.count():,}")
 
     # Preparar Silver para JOIN por movieId
-    # Seleccionar columnas relevantes y renombrar para evitar conflictos
     silver_cols = df_silver.columns
     movie_id_col = "movieId" if "movieId" in silver_cols else "movie_id"
 
@@ -160,7 +158,7 @@ def consolidate_items(df_input, df_output, df_silver):
         F.col("director") if "director" in silver_cols else F.lit(""),
     ).dropDuplicates(["_silver_movie_id"])
 
-    # JOIN con Silver
+    # JOIN con Silver por movie_id
     df_consolidated = df_bt.join(
         df_meta,
         df_bt["movie_id"].cast("int") == df_meta["_silver_movie_id"],
@@ -275,18 +273,45 @@ def bulk_index_documents(client, documents: list) -> tuple:
     from opensearchpy.helpers import bulk
 
     logger.info(f"Indexando {len(documents):,} documentos...")
+    # Log estructura del primer documento para diagnóstico
+    if documents:
+        sample = documents[0]
+        logger.info(f"  Ejemplo doc keys: {list(sample.keys())}")
+        logger.info(f"  item_embedding type: {type(sample.get('item_embedding'))}, len: {len(sample.get('item_embedding', []))}")
+        logger.info(f"  attention_weights type: {type(sample.get('attention_weights'))}")
     actions = [{"_index": OPENSEARCH_INDEX_NAME, "_id": str(d['item_idx']), "_source": d} for d in documents]
 
     total_ok, total_err = 0, 0
     for i in range(0, len(actions), BULK_BATCH_SIZE):
         batch = actions[i:i + BULK_BATCH_SIZE]
-        try:
-            ok, errors = bulk(client, batch, raise_on_error=False)
-            total_ok += ok
-            total_err += len(errors) if isinstance(errors, list) else 0
-        except Exception as e:
-            logger.error(f"  Batch {i // BULK_BATCH_SIZE + 1} error: {e}")
-            total_err += len(batch)
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                ok, errors = bulk(client, batch, raise_on_error=False)
+                total_ok += ok
+                if isinstance(errors, list) and errors:
+                    if attempt < max_retries - 1:
+                        # Reintentar tras esperar (throttling de AOSS)
+                        import time
+                        time.sleep(5 * (attempt + 1))
+                        continue
+                    total_err += len(errors)
+                    if i == 0:
+                        logger.error(f"  Primer error del bulk: {json.dumps(errors[0], default=str)[:500]}")
+                elif isinstance(errors, int):
+                    total_err += errors
+                break  # Si no hay errores, salir del retry loop
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(5 * (attempt + 1))
+                    continue
+                logger.error(f"  Batch {i // BULK_BATCH_SIZE + 1} exception: {e}")
+                total_err += len(batch)
+                break
+        # Pequeña pausa entre batches para no saturar AOSS
+        import time
+        time.sleep(1)
 
     logger.info(f"  → OK: {total_ok:,} | Errores: {total_err:,}")
     return total_ok, total_err
