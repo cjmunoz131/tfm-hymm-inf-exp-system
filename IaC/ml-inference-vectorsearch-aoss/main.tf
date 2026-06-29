@@ -14,8 +14,11 @@ locals {
   region     = data.aws_region.current.region
 
   # ARNs de principals que necesitan acceso a OpenSearch Serverless
-  # Glue Job (items_opensearch_indexing) — role creado en ml-inference-arch-phase1
+  # Glue Job 2 (items_opensearch_indexing) — role creado en ml-inference-arch-phase1
   glue_indexing_role_arn = "arn:aws:iam::${local.account_id}:role/role-gl-${var.project}-items-os-idx-glj-${terraform.workspace}"
+
+  # Glue Job 3 (topk_recommender) — role creado en ml-inference-arch-phase1
+  glue_topk_role_arn = "arn:aws:iam::${local.account_id}:role/role-gl-${var.project}-topk-rec-glj-${terraform.workspace}"
 
   # SageMaker Notebook Instance role — creado en data-arch-phase1
   sagemaker_notebook_role_arn = "arn:aws:iam::${local.account_id}:role/${var.sagemaker_notebook_role_name}"
@@ -68,6 +71,7 @@ module "aws_database_search_vectordb_os_serverless_layer_module" {
   create_access_policy     = true
   access_policy_principals = [
     local.glue_indexing_role_arn,
+    local.glue_topk_role_arn,
     local.sagemaker_notebook_role_arn,
     local.sso_admin_role_arn
   ]

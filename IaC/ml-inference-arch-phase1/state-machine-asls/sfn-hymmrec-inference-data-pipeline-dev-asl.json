@@ -227,11 +227,62 @@
           "--correlation_id.$": "$.execution_id"
         }
       },
-      "Next": "UpdateInferenceOrchestrationStatus",
+      "Next": "verifyTopKRecommender",
       "Catch": [
         {
           "ErrorEquals": ["States.ALL"],
           "Comment": "EnrichAndIndexOpenSearchError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+
+    "verifyTopKRecommender": {
+      "Type": "Choice",
+      "Comment": "Verifica si el proceso PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003 está habilitado",
+      "Choices": [
+        {
+          "Next": "GenerateTopKRecommendations",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[2]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[2].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "UpdateInferenceOrchestrationStatus"
+    },
+
+    "GenerateTopKRecommendations": {
+      "Type": "Task",
+      "Comment": "Glue Job 3: User Tower → kNN retrieval → Full Model reranking → Top-K table",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${topk_recommender_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[2].process_cod",
+          "--task_group_cod.$": "$.processes[2].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[2].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "UpdateInferenceOrchestrationStatus",
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Comment": "GenerateTopKRecommendationsError",
           "Next": "UpdateInferenceOrchestrationStatusError",
           "ResultPath": "$.masterProcessError"
         }

@@ -55,3 +55,55 @@ resource "aws_lakeformation_permissions" "glue_os_indexing_gold_tables" {
     wildcard      = true
   }
 }
+
+
+# ---------------------------------------------------------------
+# GLUE JOB: TopK Recommender (Inference Pipeline)
+# Lee: Gold DB feature_store (hymmrec_items_consolidated)
+# Escribe: Gold DB recommendations (hymmrec_topk_recommendations)
+# ---------------------------------------------------------------
+resource "aws_lakeformation_permissions" "glue_topk_rec_gold_database" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_topk_recommender_layer_module.iam_roles
+
+  permissions = ["DESCRIBE"]
+
+  database {
+    name = var.gold_catalog_database_name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_topk_rec_gold_tables" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_topk_recommender_layer_module.iam_roles
+
+  permissions = ["SELECT", "DESCRIBE"]
+
+  table {
+    database_name = var.gold_catalog_database_name
+    wildcard      = true
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_topk_rec_recommendations_database" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_topk_recommender_layer_module.iam_roles
+
+  permissions = ["DESCRIBE", "CREATE_TABLE", "ALTER"]
+
+  database {
+    name = var.recommendations_catalog_database_name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_topk_rec_recommendations_tables" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_topk_recommender_layer_module.iam_roles
+
+  permissions = ["ALL"]
+
+  table {
+    database_name = var.recommendations_catalog_database_name
+    wildcard      = true
+  }
+}

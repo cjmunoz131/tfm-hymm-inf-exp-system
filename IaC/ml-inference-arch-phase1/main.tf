@@ -100,6 +100,13 @@ resource "aws_ssm_parameter" "hymmrec_domain_context" {
   value    = file("${path.root}/config/domain-context.json")
 }
 
+resource "aws_ssm_parameter" "hymmrec_topk_recommender_params" {
+  provider = aws.account1
+  name     = "/${var.project}/${terraform.workspace}/inference-pipeline/PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003/TSKG0003/TSK0003"
+  type     = "String"
+  value    = file("${path.root}/config/topk-recommender-params.json")
+}
+
 ###############################################################################
 # DYNAMODB - Executions History (reusa la tabla existente via data source)
 ###############################################################################
@@ -455,6 +462,129 @@ module "aws_data_processing_job_glue_items_opensearch_indexing_layer_module" {
 }
 
 ###############################################################################
+# GLUE JOB 3: TopK Recommender (User Tower → kNN → Full Model Reranking)
+###############################################################################
+module "aws_data_processing_job_glue_topk_recommender_layer_module" {
+  providers = {
+    aws.main = aws.account1
+  }
+  source         = "git@github.com:cjmunoz131/terraform_modules//modules/aws/aws-data-processing-job-glue"
+  create         = true
+  project        = var.project
+  auto_scaling   = false
+  job_name       = format("%s-%s-%s", var.project, "topk-recommender", "glj-inf-${terraform.workspace}")
+  job_connections = [var.glue_network_connection_name]
+  glue_version   = "4.0"
+  timeout        = 2880
+  number_of_workers = 2
+  worker_type       = "G.1X"
+  max_retries    = 1
+  execution_property = {
+    max_concurrent_runs = 1
+  }
+  security_configuration = var.glue_security_configuration_name
+  create_role            = true
+  role_name              = format("%s-topk-rec-glj-%s", var.project, terraform.workspace)
+  bucket_deployment      = var.glue_assets_bucket_name
+  repository_name        = var.glue_assets_repository_name
+  datalake_formats       = "iceberg"
+  glue_access_databases_tables = {
+    "source_gold_database" = {
+      database_name = var.gold_catalog_database_name
+      table_names   = ["*"]
+    },
+    "target_recommendations_database" = {
+      database_name = var.recommendations_catalog_database_name
+      table_names   = ["*"]
+    }
+  }
+  aws_glue_connection_arn      = data.aws_glue_connection.existing_network_connection.arn
+  iceberg_datawarehouse_path   = "data/ml_recommendations/"
+  add_iceberg_config           = true
+  script_name = "topk_recommender_job"
+  job_parameters = {
+    "--enable-spark-ui"             = "true"
+    "--enable-job-insights"         = "false"
+    "--spark-event-logs-path"       = "s3://${var.glue_assets_bucket_name}/sparkHistoryLogs/"
+    "--gold_interactions_path"      = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/interactions/feature_interactions.parquet"
+    "--config_parameter"            = "/${var.project}/${terraform.workspace}/inference-pipeline/PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003/TSKG0003/TSK0003"
+    "--opensearch_host"             = var.opensearch_endpoint
+    "--opensearch_index_name"       = var.opensearch_index_name
+    "--source_gold_database"        = var.gold_catalog_database_name
+    "--items_consolidated_table"    = "hymmrec_items_consolidated"
+    "--target_recommendations_database" = var.recommendations_catalog_database_name
+    "--target_topk_table"           = "hymmrec_topk_recommendations"
+    "--aws_region"                  = local.region
+    "--additional-python-modules"   = "urllib3==1.26.18,opensearch-py==2.4.2,requests-aws4auth==1.2.3"
+  }
+  keys = [
+    var.storage_kms_key_id,
+    "arn:aws:kms:${local.region}:${local.account_id}:alias/aws/glue"
+  ]
+  additional_policies = [
+    {
+      name   = "AllowS3ReadGold"
+      sid    = "AllowS3ReadGold"
+      effect = "Allow"
+      actions = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ]
+      resources = [
+        "arn:aws:s3:::${var.gold_bucket_name}",
+        "arn:aws:s3:::${var.gold_bucket_name}/*"
+      ]
+    },
+    {
+      name   = "AllowOpenSearchServerlessAccess"
+      sid    = "AllowOpenSearchServerlessAccess"
+      effect = "Allow"
+      actions = [
+        "aoss:APIAccessAll"
+      ]
+      resources = [
+        "arn:aws:aoss:${local.region}:${local.account_id}:collection/*"
+      ]
+    },
+    {
+      name   = "AllowSageMakerEndpointInvoke"
+      sid    = "AllowSageMakerEndpointInvoke"
+      effect = "Allow"
+      actions = [
+        "sagemaker:InvokeEndpoint"
+      ]
+      resources = [
+        "arn:aws:sagemaker:${local.region}:${local.account_id}:endpoint/${var.user_tower_endpoint_name}",
+        "arn:aws:sagemaker:${local.region}:${local.account_id}:endpoint/${var.full_model_endpoint_name}"
+      ]
+    },
+    {
+      name   = "AllowSSMParameterAccess"
+      sid    = "AllowSSMParameterAccess"
+      effect = "Allow"
+      actions = [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ]
+      resources = [
+        "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.project}/${terraform.workspace}/*"
+      ]
+    }
+  ]
+  command = {
+    name           = "glueetl"
+    script_path    = "${var.glue_assets_repository_name}/scripts"
+    python_version = "3"
+  }
+  main_source_path = "./${path.root}/dev/glue"
+  source_buckets   = [var.gold_bucket_name]
+  destiny_buckets  = [var.gold_bucket_name]
+  sources_types    = ["s3"]
+}
+
+###############################################################################
 # SAGEMAKER MODEL (Item Tower - creado en ml-arch-cd-phase2, referenciado aquí)
 ###############################################################################
 data "aws_iam_role" "sagemaker_endpoint_role" {
@@ -481,6 +611,7 @@ module "aws_integration_workflow_inference_pipeline_step_function_layer_module" 
     updateInferenceOrchStatusARN      = module.aws_app_compute_lambda_update_inference_orchestration_status_layer_module.lambda_arn
     items_batch_preparation_glj       = module.aws_data_processing_job_glue_items_batch_preparation_layer_module.job_name
     items_opensearch_indexing_glj     = module.aws_data_processing_job_glue_items_opensearch_indexing_layer_module.job_name
+    topk_recommender_glj              = module.aws_data_processing_job_glue_topk_recommender_layer_module.job_name
     item_tower_model_name             = var.item_tower_model_name
     batch_transform_input_s3_uri      = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-input/"
     batch_transform_output_s3_uri     = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-output/"
@@ -498,6 +629,7 @@ module "aws_integration_workflow_inference_pipeline_step_function_layer_module" 
     updateInferenceOrchStatusARN      = module.aws_app_compute_lambda_update_inference_orchestration_status_layer_module.lambda_arn
     items_batch_preparation_job_ARN   = module.aws_data_processing_job_glue_items_batch_preparation_layer_module.job_arn
     items_opensearch_indexing_job_ARN = module.aws_data_processing_job_glue_items_opensearch_indexing_layer_module.job_arn
+    topk_recommender_job_ARN          = module.aws_data_processing_job_glue_topk_recommender_layer_module.job_arn
     sagemaker_bt_role_arn             = data.aws_iam_role.sagemaker_endpoint_role.arn
     region                            = local.region
     account_id                        = local.account_id

@@ -1,9 +1,10 @@
-Comment: A description of my state machine
+Comment: "HYMM-REC Inference Pipeline: Prepara JSONL → Batch Transform Item
+  Tower → Enriquece + Indexa OpenSearch"
 StartAt: Manifest Builder
 States:
   Manifest Builder:
     Type: Pass
-    Next: RegisterMasterOrchestrationExecution
+    Next: RegisterInferenceOrchestrationExecution
     Parameters:
       workflowVersion: 1.0.0
       execution_id.$: $.workflow_execution_plan.execution_id
@@ -17,11 +18,11 @@ States:
       source_trigger.$: $.workflow_execution_plan.source_trigger
       processes.$: $.workflow_execution_plan.processes
       global_settings.$: $.workflow_execution_plan.global_settings
-  RegisterMasterOrchestrationExecution:
+  RegisterInferenceOrchestrationExecution:
     Type: Task
     Resource: arn:aws:states:::lambda:invoke
     Parameters:
-      FunctionName: ${registerMasterOrchestrationARN}
+      FunctionName: ${registerInferenceOrchestrationARN}
       Payload.$: $
     Retry:
       - ErrorEquals:
@@ -66,8 +67,9 @@ States:
     Default: Error
   verifyBatchTransformItemTower:
     Type: Choice
+    Comment: Verifica si el proceso PRCS-BATCH-TRANSFORM-ITEM-TOWER-001 está habilitado
     Choices:
-      - Next: BatchTransformItemTowerJob
+      - Next: PrepareItemsBatchJSONL
         And:
           - Variable: $.processes
             IsPresent: true
@@ -75,86 +77,99 @@ States:
             IsPresent: true
           - Variable: $.processes[0].flag_enabled
             NumericEquals: 1
-    Default: verifyExtractPosterTMDB
-  BatchTransformItemTowerJob:
+    Default: verifyIndexVectorDatabase
+  PrepareItemsBatchJSONL:
     Type: Task
-    Resource: arn:aws:states:::sagemaker:createTransformJob.sync
-    Parameters:
-      ModelName: SageMakerCreateTransformJobModel-9iFBKsYti9vr
-      TransformInput:
-        CompressionType: None
-        ContentType: text/csv
-        DataSource:
-          S3DataSource:
-            S3DataType: S3Prefix
-            S3Uri: s3://my-s3bucket-example-1/TransformJobDataInput.txt
-      TransformOutput:
-        S3OutputPath: s3://my-s3bucket-example-1/TransformJobOutputPath
-      TransformResources:
-        InstanceCount: 1
-        InstanceType: ml.m4.xlarge
-      TransformJobName: sfn-binary-classification-prediction
-    Next: BatchTransformItemTower
-  BatchTransformItemTower:
-    Type: Task
+    Comment: "Glue Job 1: Lee Gold + embeddings_catalog → genera JSONL para Batch
+      Transform"
     Resource: arn:aws:states:::glue:startJobRun.sync
     Parameters:
-      JobName: ${tmdb_baseline_bronze_glj}
+      JobName: ${items_batch_preparation_glj}
       Arguments:
         --process_cod.$: $.processes[0].process_cod
         --task_group_cod.$: $.processes[0].task_groups[0].task_group_cod
         --task_cod.$: $.processes[0].task_groups[0].tasks[0].task_cod
         --pipeline_id.$: $.pipeline_id
         --correlation_id.$: $.execution_id
-    Next: StartCrawler
+    Next: SageMakerBatchTransformItemTower
     Catch:
       - ErrorEquals:
           - States.ALL
-        Next: UpdateMasterOrchestrationStatusError
+        Comment: PrepareItemsBatchJSONLError
+        Next: UpdateInferenceOrchestrationStatusError
         ResultPath: $.masterProcessError
     ResultPath: null
-  StartCrawler:
+  SageMakerBatchTransformItemTower:
     Type: Task
+    Comment: "Batch Transform: Item Tower model genera embeddings 64D +
+      attention_weights"
+    Resource: arn:aws:states:::sagemaker:createTransformJob.sync
     Parameters:
-      Name: ${tmdb-bl-crawler-glue-name}
-    Resource: arn:aws:states:::aws-sdk:glue:startCrawler
-    Next: verifyExtractPosterTMDB
+      TransformJobName.$: States.Format('hymmrec-item-tower-bt-{}', $.execution_id)
+      ModelName: ${item_tower_model_name}
+      TransformInput:
+        DataSource:
+          S3DataSource:
+            S3DataType: S3Prefix
+            S3Uri: ${batch_transform_input_s3_uri}
+        ContentType: application/jsonlines
+        SplitType: Line
+      TransformOutput:
+        S3OutputPath: ${batch_transform_output_s3_uri}
+        Accept: application/jsonlines
+        AssembleWith: Line
+      TransformResources:
+        InstanceCount: 1
+        InstanceType: ml.m5.xlarge
+      BatchStrategy: SingleRecord
+    Next: verifyIndexVectorDatabase
+    Catch:
+      - ErrorEquals:
+          - States.ALL
+        Comment: BatchTransformItemTowerError
+        Next: UpdateInferenceOrchestrationStatusError
+        ResultPath: $.masterProcessError
     ResultPath: null
-  verifyExtractPosterTMDB:
+  verifyIndexVectorDatabase:
     Type: Choice
+    Comment: Verifica si el proceso PRCS-INDEX-VECTOR-DATABASE-002 está habilitado
     Choices:
-      - And:
+      - Next: EnrichAndIndexOpenSearch
+        And:
           - Variable: $.processes
             IsPresent: true
           - Variable: $.processes[1]
             IsPresent: true
           - Variable: $.processes[1].flag_enabled
             NumericEquals: 1
-        Next: ExtractPosterTMDBSilver
-    Default: verifyCreateSilverTables
-  ExtractPosterTMDBSilver:
+    Default: verifyTopKRecommender
+  EnrichAndIndexOpenSearch:
     Type: Task
+    Comment: "Glue Job 2: Lee Batch Transform output + Silver metadata → Bulk index
+      OpenSearch kNN"
     Resource: arn:aws:states:::glue:startJobRun.sync
     Parameters:
-      JobName: ${tmdb_posters_silver_glj}
+      JobName: ${items_opensearch_indexing_glj}
       Arguments:
         --process_cod.$: $.processes[1].process_cod
         --task_group_cod.$: $.processes[1].task_groups[0].task_group_cod
         --task_cod.$: $.processes[1].task_groups[0].tasks[0].task_cod
         --pipeline_id.$: $.pipeline_id
         --correlation_id.$: $.execution_id
-    Next: verifyCreateSilverTables
+    Next: verifyTopKRecommender
     Catch:
       - ErrorEquals:
           - States.ALL
-        Comment: ExtractPosterTMDBAllErrors
-        Next: UpdateMasterOrchestrationStatusError
+        Comment: EnrichAndIndexOpenSearchError
+        Next: UpdateInferenceOrchestrationStatusError
         ResultPath: $.masterProcessError
     ResultPath: null
-  verifyCreateSilverTables:
+  verifyTopKRecommender:
     Type: Choice
+    Comment: Verifica si el proceso PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003 está
+      habilitado
     Choices:
-      - Next: CreateOBTSilverTables
+      - Next: GenerateTopKRecommendations
         And:
           - Variable: $.processes
             IsPresent: true
@@ -162,31 +177,33 @@ States:
             IsPresent: true
           - Variable: $.processes[2].flag_enabled
             NumericEquals: 1
-    Default: UpdateMasterOrchestrationStatus
-  CreateOBTSilverTables:
+    Default: UpdateInferenceOrchestrationStatus
+  GenerateTopKRecommendations:
     Type: Task
+    Comment: "Glue Job 3: User Tower → kNN retrieval → Full Model reranking → Top-K
+      table"
     Resource: arn:aws:states:::glue:startJobRun.sync
     Parameters:
-      JobName: ${create_OBT_silver_glj}
+      JobName: ${topk_recommender_glj}
       Arguments:
         --process_cod.$: $.processes[2].process_cod
         --task_group_cod.$: $.processes[2].task_groups[0].task_group_cod
         --task_cod.$: $.processes[2].task_groups[0].tasks[0].task_cod
         --pipeline_id.$: $.pipeline_id
         --correlation_id.$: $.execution_id
-    Next: UpdateMasterOrchestrationStatus
+    Next: UpdateInferenceOrchestrationStatus
     Catch:
       - ErrorEquals:
           - States.ALL
-        Comment: CreateOBTSilverTablesError
-        Next: UpdateMasterOrchestrationStatusError
+        Comment: GenerateTopKRecommendationsError
+        Next: UpdateInferenceOrchestrationStatusError
         ResultPath: $.masterProcessError
     ResultPath: null
-  UpdateMasterOrchestrationStatus:
+  UpdateInferenceOrchestrationStatus:
     Type: Task
     Resource: arn:aws:states:::lambda:invoke
     Parameters:
-      FunctionName: ${updateMasterOrchStatusARN}
+      FunctionName: ${updateInferenceOrchStatusARN}
       Payload.$: $
     Retry:
       - ErrorEquals:
@@ -199,13 +216,13 @@ States:
         BackoffRate: 2
         JitterStrategy: FULL
     Next: Success
-  UpdateMasterOrchestrationStatusError:
+  UpdateInferenceOrchestrationStatusError:
     Type: Task
     Resource: arn:aws:states:::lambda:invoke
     OutputPath: $.Payload
     Parameters:
       Payload.$: $
-      FunctionName: ${updateMasterOrchStatusARN}
+      FunctionName: ${updateInferenceOrchStatusARN}
     Retry:
       - ErrorEquals:
           - Lambda.ServiceException

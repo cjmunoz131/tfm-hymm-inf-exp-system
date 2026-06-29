@@ -192,6 +192,12 @@ variable "gold_catalog_database_name" {
   default     = "hymmrec_tfm_ml_feature_store_gold"
 }
 
+variable "recommendations_catalog_database_name" {
+  type        = string
+  description = "Glue Catalog database name for Gold ML Recommendations (top-K + explainability)"
+  default     = "hymmrec_tfm_ml_recommendations_gold"
+}
+
 ###############################################################################
 # SAGEMAKER - Item Tower Model (creado en ml-arch-cd-phase2)
 ###############################################################################
@@ -214,4 +220,19 @@ variable "opensearch_index_name" {
   description = "OpenSearch index name for item embeddings"
   type        = string
   default     = "hymmrec-items-vectors"
+}
+
+###############################################################################
+# SAGEMAKER ENDPOINTS (creados en ml-arch-cd-phase2)
+###############################################################################
+variable "user_tower_endpoint_name" {
+  description = "SageMaker endpoint name for User Tower"
+  type        = string
+  default     = "hymmrec-user-tower-endpoint"
+}
+
+variable "full_model_endpoint_name" {
+  description = "SageMaker endpoint name for Full Model (Two-Heads)"
+  type        = string
+  default     = "hymmrec-full-model-endpoint"
 }

@@ -1,0 +1,8 @@
+{
+  "top_k": 10,
+  "retrieval_k": 100,
+  "user_tower_endpoint": "hymmrec-user-tower-endpoint",
+  "full_model_endpoint": "hymmrec-full-model-endpoint",
+  "batch_size_users": 50,
+  "batch_size_reranking": 20
+}

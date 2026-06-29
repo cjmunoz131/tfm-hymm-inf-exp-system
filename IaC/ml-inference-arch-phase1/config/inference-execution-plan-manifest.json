@@ -30,7 +30,7 @@
       },
       {
         "process_cod": "PRCS-INDEX-VECTOR-DATABASE-002",
-        "flag_enabled": 1,
+        "flag_enabled": 0,
         "description": "Flujo de indexación de los documentos de items dentro del opensearch",
         "task_groups": [
           {
@@ -43,9 +43,9 @@
         ]
       },
       {
-        "process_cod": "PRCS-BATCH-TRANSFORM-RECOMMENDER-TOP3-003",
-        "flag_enabled": 0,
-        "description": "Flujo de generación de recomendaciones TOP-3 consumiendo el full model sagemaker endpoint",
+        "process_cod": "PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003",
+        "flag_enabled": 1,
+        "description": "Flujo de generación de recomendaciones TOP-K consumiendo User Tower + kNN retrieval + Full Model reranking",
         "task_groups": [
           {
             "task_group_cod": "TSKG0003",
