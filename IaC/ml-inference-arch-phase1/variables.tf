@@ -228,11 +228,11 @@ variable "opensearch_index_name" {
 variable "user_tower_endpoint_name" {
   description = "SageMaker endpoint name for User Tower"
   type        = string
-  default     = "hymmrec-user-tower-endpoint"
+  default     = "hymmrec-user-tower-sgmkr-ep"
 }
 
 variable "full_model_endpoint_name" {
   description = "SageMaker endpoint name for Full Model (Two-Heads)"
   type        = string
-  default     = "hymmrec-full-model-endpoint"
+  default     = "hymmrec-full-model-sgmkr-ep"
 }
