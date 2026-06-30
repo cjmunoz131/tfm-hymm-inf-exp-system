@@ -264,12 +264,14 @@ def rerank_candidates(user_idx: int, candidates: list, items_lookup: dict,
 # ============================================================
 # PIPELINE POR USUARIO
 # ============================================================
-def process_user(user_idx: int, config: dict, os_client, items_lookup: dict, now_iso: str) -> list:
+def process_user(user_idx: int, config: dict, os_client, items_lookup: dict,
+                 seen_items: set, now_iso: str) -> list:
     """
     Pipeline completo para un usuario:
       1. User Tower → embedding
       2. kNN retrieval → candidatos (item_idx + retrieval_score)
-      3. Full Model reranking (features de items_consolidated) → top-K
+      3. Filtrar ítems ya vistos por el usuario
+      4. Full Model reranking (features de items_consolidated) → top-K
     """
     top_k = config['top_k']
     retrieval_k = config['retrieval_k']
@@ -287,14 +289,20 @@ def process_user(user_idx: int, config: dict, os_client, items_lookup: dict, now
         if not candidates:
             return []
 
-        # 3. Reranking con Full Model (features de items_consolidated)
+        # 3. Filtrar ítems ya vistos por el usuario
+        candidates = [c for c in candidates if c['item_idx'] not in seen_items]
+
+        if not candidates:
+            return []
+
+        # 4. Reranking con Full Model (features de items_consolidated)
         scored = rerank_candidates(user_idx, candidates, items_lookup,
                                    full_model_endpoint, batch_size_reranking)
 
-        # 4. Top-K
+        # 5. Top-K
         topk = scored[:top_k]
 
-        # 5. Construir registros de salida (incluye metadata para explicabilidad)
+        # 6. Construir registros de salida (incluye metadata para explicabilidad)
         records = []
         for rank, item in enumerate(topk, start=1):
             records.append({
@@ -360,12 +368,23 @@ def main():
     logger.info("\n[PASO 1/5] Cargando configuración...")
     config = load_config()
 
-    # 2. LEER USUARIOS ÚNICOS
-    logger.info("\n[PASO 2/6] Leyendo usuarios únicos desde Gold...")
+    # 2. LEER USUARIOS ÚNICOS + CONSTRUIR HISTORIAL DE INTERACCIONES
+    logger.info("\n[PASO 2/6] Leyendo usuarios únicos y su historial desde Gold...")
     df_gold = spark.read.parquet(GOLD_INTERACTIONS_PATH)
     user_idxs = [row['userId_idx'] for row in
                  df_gold.select('userId_idx').distinct().orderBy('userId_idx').collect()]
     logger.info(f"  → Usuarios únicos: {len(user_idxs):,}")
+
+    # Construir lookup: user_idx → set de movieId_idx ya vistos
+    user_seen_items = {}
+    interactions_rows = df_gold.select('userId_idx', 'movieId_idx').collect()
+    for row in interactions_rows:
+        uid = int(row['userId_idx'])
+        mid = int(row['movieId_idx'])
+        if uid not in user_seen_items:
+            user_seen_items[uid] = set()
+        user_seen_items[uid].add(mid)
+    logger.info(f"  → Historial construido: {len(user_seen_items):,} usuarios con interacciones")
 
     # 3. LEER ITEMS CONSOLIDATED (features para reranking + metadata)
     logger.info("\n[PASO 3/6] Leyendo hymmrec_items_consolidated desde Gold...")
@@ -390,7 +409,8 @@ def main():
     batch_size_users = config.get('batch_size_users', 50)
 
     for i, user_idx in enumerate(user_idxs):
-        records = process_user(user_idx, config, os_client, items_lookup, now_iso)
+        seen_items = user_seen_items.get(user_idx, set())
+        records = process_user(user_idx, config, os_client, items_lookup, seen_items, now_iso)
         all_records.extend(records)
 
         # Log progreso cada N usuarios
