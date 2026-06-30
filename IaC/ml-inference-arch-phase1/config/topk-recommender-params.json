@@ -1,7 +1,8 @@
 {
   "top_k": 10,
-  "retrieval_k": 100,
-  "user_tower_endpoint": "hymmrec-user-tower-sgmkr-ep",
+  "max_seeds": 10,
+  "retrieval_per_seed": 50,
+  "seed_rating_threshold": 4.0,
   "full_model_endpoint": "hymmrec-full-model-sgmkr-ep",
   "batch_size_users": 50,
   "batch_size_reranking": 20
