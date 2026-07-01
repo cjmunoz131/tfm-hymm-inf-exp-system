@@ -20,7 +20,8 @@
     "Resource": [
       "${items_batch_preparation_job_ARN}",
       "${items_opensearch_indexing_job_ARN}",
-      "${topk_recommender_job_ARN}"
+      "${topk_recommender_job_ARN}",
+      "${explainability_silver_set_job_ARN}"
     ]
   },
   {

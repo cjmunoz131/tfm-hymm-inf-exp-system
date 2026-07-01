@@ -107,6 +107,13 @@ resource "aws_ssm_parameter" "hymmrec_topk_recommender_params" {
   value    = file("${path.root}/config/topk-recommender-params.json")
 }
 
+resource "aws_ssm_parameter" "hymmrec_explainability_silver_set_params" {
+  provider = aws.account1
+  name     = "/${var.project}/${terraform.workspace}/inference-pipeline/PRCS-IAGEN-SILVERSET-SLVR-004/TSKG0004/TSK0004"
+  type     = "String"
+  value    = file("${path.root}/config/explainability-silver-set-params.json")
+}
+
 ###############################################################################
 # DYNAMODB - Executions History (reusa la tabla existente via data source)
 ###############################################################################
@@ -128,7 +135,7 @@ module "aws_integration_event_bus_event_bridge_scheduler_layer_module" {
   rule_type           = "schedule"
   project             = var.project
   schedule_expression = var.event_bridge_scheduler_expression
-  state               = "ENABLED"
+  state               = "DISABLED"
   targets = [{
     target_id     = "lambda-${var.project}-${var.data_orchestrator_trigger_functionality}-${terraform.workspace}"
     arn           = module.aws_app_compute_lambda_inference_orchestrator_trigger_layer_module.lambda_arn
@@ -592,6 +599,138 @@ data "aws_iam_role" "sagemaker_endpoint_role" {
   name     = "${var.project}-sm-endpoint-iar-${terraform.workspace}"
 }
 
+###############################################################################
+# SECRET MANAGER: OpenAI API Key (for explainability job)
+###############################################################################
+module "aws_security_secrets_openai_api_key_layer_module" {
+  providers = {
+    aws.main = aws.account1
+  }
+  source                           = "git@github.com:cjmunoz131/terraform_modules//modules/aws/aws-security-secret-secret-manager"
+  secret_name                      = "tfm-${var.project}-openai-api-key"
+  create_random_password           = true
+  random_password_length           = 32
+  random_password_override_special = "!&"
+}
+
+###############################################################################
+# GLUE JOB 4: Explainability Silver Set (GPT-4 → keywords for Llama fine-tuning)
+###############################################################################
+module "aws_data_processing_job_glue_explainability_silver_set_layer_module" {
+  providers = {
+    aws.main = aws.account1
+  }
+  source         = "git@github.com:cjmunoz131/terraform_modules//modules/aws/aws-data-processing-job-glue"
+  create         = true
+  project        = var.project
+  auto_scaling   = false
+  job_name       = format("%s-%s-%s", var.project, "explainability-silver-set", "glj-inf-${terraform.workspace}")
+  job_connections = [var.glue_network_connection_name]
+  glue_version   = "4.0"
+  timeout        = 2880
+  number_of_workers = 2
+  worker_type       = "G.1X"
+  max_retries    = 1
+  execution_property = {
+    max_concurrent_runs = 1
+  }
+  security_configuration = var.glue_security_configuration_name
+  create_role            = true
+  role_name              = format("%s-explain-glj-%s", var.project, terraform.workspace)
+  bucket_deployment      = var.glue_assets_bucket_name
+  repository_name        = var.glue_assets_repository_name
+  datalake_formats       = "iceberg"
+  glue_access_databases_tables = {
+    "source_silver_database" = {
+      database_name = var.silver_catalog_database_name
+      table_names   = ["*"]
+    }
+    "source_gold_database" = {
+      database_name = var.gold_catalog_database_name
+      table_names   = ["*"]
+    }
+    "target_recommendations_database" = {
+      database_name = var.recommendations_catalog_database_name
+      table_names   = ["*"]
+    }
+  }
+  aws_glue_connection_arn      = data.aws_glue_connection.existing_network_connection.arn
+  iceberg_datawarehouse_path   = "data/ml_recommendations/"
+  add_iceberg_config           = true
+  script_name = "explainability_silver_set_job"
+  job_parameters = {
+    "--enable-spark-ui"                       = "true"
+    "--enable-job-insights"                   = "false"
+    "--spark-event-logs-path"                 = "s3://${var.glue_assets_bucket_name}/sparkHistoryLogs/"
+    "--config_parameter"                      = "/${var.project}/${terraform.workspace}/inference-pipeline/PRCS-IAGEN-SILVERSET-SLVR-004/TSKG0004/TSK0004"
+    "--secret_name"                           = module.aws_security_secrets_openai_api_key_layer_module.secret_id
+    "--source_recommendations_database"       = var.recommendations_catalog_database_name
+    "--source_topk_table"                     = "hymmrec_topk_recommendations"
+    "--source_silver_database"                = var.silver_catalog_database_name
+    "--source_silver_movies_table"            = "cleansed_movies"
+    "--gold_interactions_path"                = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/interactions/feature_interactions.parquet"
+    "--target_recommendations_database"       = var.recommendations_catalog_database_name
+    "--target_explainability_table"           = "hymmrec_explainability_silver_set"
+    "--output_jsonl_path"                     = "s3://${var.gold_bucket_name}/data/ml_recommendations/explainability/silver_set_sft.jsonl"
+    "--aws_region"                            = local.region
+    "--additional-python-modules"             = "httpx==0.27.0,openai==1.35.0"
+  }
+  keys = [
+    var.storage_kms_key_id,
+    "arn:aws:kms:${local.region}:${local.account_id}:alias/aws/glue"
+  ]
+  additional_policies = [
+    {
+      name   = "AllowS3ReadGoldSilverAndWrite"
+      sid    = "AllowS3ReadGoldSilverAndWrite"
+      effect = "Allow"
+      actions = [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListBucket"
+      ]
+      resources = [
+        "arn:aws:s3:::${var.gold_bucket_name}",
+        "arn:aws:s3:::${var.gold_bucket_name}/*",
+        "arn:aws:s3:::${var.silver_bucket_name}",
+        "arn:aws:s3:::${var.silver_bucket_name}/*"
+      ]
+    },
+    {
+      name   = "AllowSecretsManagerRead"
+      sid    = "AllowSecretsManagerRead"
+      effect = "Allow"
+      actions = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ]
+      resources = [module.aws_security_secrets_openai_api_key_layer_module.secret_arn]
+    },
+    {
+      name   = "AllowSSMParameterAccess"
+      sid    = "AllowSSMParameterAccess"
+      effect = "Allow"
+      actions = [
+        "ssm:GetParameter",
+        "ssm:GetParameters"
+      ]
+      resources = [
+        "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.project}/${terraform.workspace}/*"
+      ]
+    }
+  ]
+  command = {
+    name           = "glueetl"
+    script_path    = "${var.glue_assets_repository_name}/scripts"
+    python_version = "3"
+  }
+  main_source_path = "./${path.root}/dev/glue"
+  source_buckets   = [var.gold_bucket_name, var.silver_bucket_name]
+  destiny_buckets  = [var.gold_bucket_name]
+  sources_types    = ["s3"]
+}
+
 
 ###############################################################################
 # STEP FUNCTION: Inference Pipeline Orchestration
@@ -612,6 +751,7 @@ module "aws_integration_workflow_inference_pipeline_step_function_layer_module" 
     items_batch_preparation_glj       = module.aws_data_processing_job_glue_items_batch_preparation_layer_module.job_name
     items_opensearch_indexing_glj     = module.aws_data_processing_job_glue_items_opensearch_indexing_layer_module.job_name
     topk_recommender_glj              = module.aws_data_processing_job_glue_topk_recommender_layer_module.job_name
+    explainability_silver_set_glj     = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.job_name
     item_tower_model_name             = var.item_tower_model_name
     batch_transform_input_s3_uri      = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-input/"
     batch_transform_output_s3_uri     = "s3://${var.gold_bucket_name}/data/${var.ml_use_case}/inference/batch-transform-output/"
@@ -630,6 +770,7 @@ module "aws_integration_workflow_inference_pipeline_step_function_layer_module" 
     items_batch_preparation_job_ARN   = module.aws_data_processing_job_glue_items_batch_preparation_layer_module.job_arn
     items_opensearch_indexing_job_ARN = module.aws_data_processing_job_glue_items_opensearch_indexing_layer_module.job_arn
     topk_recommender_job_ARN          = module.aws_data_processing_job_glue_topk_recommender_layer_module.job_arn
+    explainability_silver_set_job_ARN = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.job_arn
     sagemaker_bt_role_arn             = data.aws_iam_role.sagemaker_endpoint_role.arn
     region                            = local.region
     account_id                        = local.account_id

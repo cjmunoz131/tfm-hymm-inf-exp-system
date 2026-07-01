@@ -107,3 +107,77 @@ resource "aws_lakeformation_permissions" "glue_topk_rec_recommendations_tables" 
     wildcard      = true
   }
 }
+
+# ---------------------------------------------------------------
+# GLUE JOB: Explainability Silver Set (Inference Pipeline)
+# Lee: Silver DB (cleansed_movies) + Gold feature_store + Gold recommendations
+# Escribe: Gold recommendations (hymmrec_explainability_silver_set)
+# ---------------------------------------------------------------
+resource "aws_lakeformation_permissions" "glue_explain_silver_database" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["DESCRIBE"]
+
+  database {
+    name = var.silver_catalog_database_name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_explain_silver_tables" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["SELECT", "DESCRIBE"]
+
+  table {
+    database_name = var.silver_catalog_database_name
+    wildcard      = true
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_explain_gold_database" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["DESCRIBE"]
+
+  database {
+    name = var.gold_catalog_database_name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_explain_gold_tables" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["SELECT", "DESCRIBE"]
+
+  table {
+    database_name = var.gold_catalog_database_name
+    wildcard      = true
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_explain_recommendations_database" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["DESCRIBE", "CREATE_TABLE", "ALTER"]
+
+  database {
+    name = var.recommendations_catalog_database_name
+  }
+}
+
+resource "aws_lakeformation_permissions" "glue_explain_recommendations_tables" {
+  provider   = aws.account1
+  principal  = module.aws_data_processing_job_glue_explainability_silver_set_layer_module.iam_roles
+
+  permissions = ["ALL"]
+
+  table {
+    database_name = var.recommendations_catalog_database_name
+    wildcard      = true
+  }
+}

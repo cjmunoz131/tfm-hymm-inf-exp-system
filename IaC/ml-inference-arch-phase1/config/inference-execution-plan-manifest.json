@@ -44,7 +44,7 @@
       },
       {
         "process_cod": "PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003",
-        "flag_enabled": 1,
+        "flag_enabled": 0,
         "description": "Flujo de generación de recomendaciones TOP-K consumiendo User Tower + kNN retrieval + Full Model reranking",
         "task_groups": [
           {
@@ -58,8 +58,8 @@
       },
       {
         "process_cod": "PRCS-IAGEN-SILVERSET-SLVR-004",
-        "flag_enabled": 0,
-        "description": "Flujo de generación y limpieza del silver set usando OpenAI GPT-4 e ingestandolo en el datalake Silver Zone",
+        "flag_enabled": 1,
+        "description": "Flujo de generación del silver set de explicabilidad usando GPT-4o para fine-tuning de Llama 3.1 8B",
         "task_groups": [
           {
             "task_group_cod": "TSKG0004",

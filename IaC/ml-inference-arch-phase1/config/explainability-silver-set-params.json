@@ -1,0 +1,6 @@
+{
+  "min_pred_rating_stars": 3.5,
+  "top_k_explain": 5,
+  "max_samples": 2000,
+  "profile_rating_threshold": 4.0
+}

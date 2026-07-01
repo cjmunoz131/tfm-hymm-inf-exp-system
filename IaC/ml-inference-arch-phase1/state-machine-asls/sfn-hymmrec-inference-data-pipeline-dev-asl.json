@@ -261,7 +261,7 @@
           ]
         }
       ],
-      "Default": "UpdateInferenceOrchestrationStatus"
+      "Default": "verifyExplainabilitySilverSet"
     },
     "GenerateTopKRecommendations": {
       "Type": "Task",
@@ -277,13 +277,64 @@
           "--correlation_id.$": "$.execution_id"
         }
       },
-      "Next": "UpdateInferenceOrchestrationStatus",
+      "Next": "verifyExplainabilitySilverSet",
       "Catch": [
         {
           "ErrorEquals": [
             "States.ALL"
           ],
           "Comment": "GenerateTopKRecommendationsError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+    "verifyExplainabilitySilverSet": {
+      "Type": "Choice",
+      "Comment": "Verifica si PRCS-IAGEN-SILVERSET-SLVR-004 está habilitado",
+      "Choices": [
+        {
+          "Next": "GenerateExplainabilitySilverSet",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[3]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[3].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "UpdateInferenceOrchestrationStatus"
+    },
+    "GenerateExplainabilitySilverSet": {
+      "Type": "Task",
+      "Comment": "Glue Job 4: GPT-4 genera silver set de explicabilidad para fine-tuning Llama",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${explainability_silver_set_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[3].process_cod",
+          "--task_group_cod.$": "$.processes[3].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[3].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "UpdateInferenceOrchestrationStatus",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "GenerateExplainabilitySilverSetError",
           "Next": "UpdateInferenceOrchestrationStatusError",
           "ResultPath": "$.masterProcessError"
         }
