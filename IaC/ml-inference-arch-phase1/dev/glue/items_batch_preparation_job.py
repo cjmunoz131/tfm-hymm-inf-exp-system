@@ -210,8 +210,8 @@ def build_batch_records(df_items: pd.DataFrame, embeddings_catalog: dict) -> lis
         item_idx = int(row['movieId_idx'])
         movie_id = int(row['movie_id'])
 
-        # Buscar embeddings
-        emb_data = embeddings_catalog.get(item_idx)
+        # Buscar embeddings por movieId (key real del embeddings_catalog)
+        emb_data = embeddings_catalog.get(movie_id)
         if emb_data is None:
             items_sin_emb += 1
             continue

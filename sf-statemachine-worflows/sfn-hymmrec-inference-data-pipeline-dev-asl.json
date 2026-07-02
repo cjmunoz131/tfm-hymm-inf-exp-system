@@ -1,0 +1,403 @@
+{
+  "Comment": "HYMM-REC Inference Pipeline: Prepara JSONL → Batch Transform Item Tower → Enriquece + Indexa OpenSearch",
+  "StartAt": "Manifest Builder",
+  "States": {
+    "Manifest Builder": {
+      "Type": "Pass",
+      "Next": "RegisterInferenceOrchestrationExecution",
+      "Parameters": {
+        "workflowVersion": "1.0.0",
+        "execution_id.$": "$.workflow_execution_plan.execution_id",
+        "pipeline_id.$": "$.workflow_execution_plan.pipeline_id",
+        "execution_start_time.$": "$$.Execution.StartTime",
+        "domain.$": "$.workflow_execution_plan.domain",
+        "project.$": "$.workflow_execution_plan.project",
+        "domain_project_id.$": "$.workflow_execution_plan.domain_project_id",
+        "workflow_start_time.$": "$.workflow_execution_plan.workflow_start_time",
+        "execution_type.$": "$.workflow_execution_plan.execution_type",
+        "source_trigger.$": "$.workflow_execution_plan.source_trigger",
+        "processes.$": "$.workflow_execution_plan.processes",
+        "global_settings.$": "$.workflow_execution_plan.global_settings"
+      }
+    },
+    "RegisterInferenceOrchestrationExecution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${registerInferenceOrchestrationARN}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "verifyRegisterOrchestrationSkipped",
+      "ResultPath": "$.registerOrchestrationStatus",
+      "ResultSelector": {
+        "statusCode.$": "$.Payload.statusCode",
+        "status.$": "$.Payload.body.status",
+        "message.$": "$.Payload.body.message",
+        "execution_time.$": "$.Payload.body.execution_time"
+      }
+    },
+    "verifyRegisterOrchestrationSkipped": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Next": "Execution SKIPPED",
+          "And": [
+            {
+              "Variable": "$.registerOrchestrationStatus",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.registerOrchestrationStatus.statusCode",
+              "NumericEquals": 409
+            },
+            {
+              "Variable": "$.registerOrchestrationStatus.status",
+              "StringEquals": "SKIPPED"
+            }
+          ]
+        }
+      ],
+      "Default": "verifyRegisterOrchestrationSuccess"
+    },
+    "verifyRegisterOrchestrationSuccess": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.registerOrchestrationStatus",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.registerOrchestrationStatus.statusCode",
+              "NumericEquals": 201
+            },
+            {
+              "Variable": "$.registerOrchestrationStatus.status",
+              "StringEquals": "IN_PROGRESS"
+            }
+          ],
+          "Next": "verifyBatchTransformItemTower"
+        }
+      ],
+      "Default": "Error"
+    },
+    "verifyBatchTransformItemTower": {
+      "Type": "Choice",
+      "Comment": "Verifica si el proceso PRCS-BATCH-TRANSFORM-ITEM-TOWER-001 está habilitado",
+      "Choices": [
+        {
+          "Next": "PrepareItemsBatchJSONL",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[0]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[0].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "verifyIndexVectorDatabase"
+    },
+    "PrepareItemsBatchJSONL": {
+      "Type": "Task",
+      "Comment": "Glue Job 1: Lee Gold + embeddings_catalog → genera JSONL para Batch Transform",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${items_batch_preparation_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[0].process_cod",
+          "--task_group_cod.$": "$.processes[0].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[0].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "SageMakerBatchTransformItemTower",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "PrepareItemsBatchJSONLError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+    "SageMakerBatchTransformItemTower": {
+      "Type": "Task",
+      "Comment": "Batch Transform: Item Tower model genera embeddings 64D + attention_weights",
+      "Resource": "arn:aws:states:::sagemaker:createTransformJob.sync",
+      "Parameters": {
+        "TransformJobName.$": "States.Format('hymmrec-item-tower-bt-{}', $.execution_id)",
+        "ModelName": "${item_tower_model_name}",
+        "TransformInput": {
+          "DataSource": {
+            "S3DataSource": {
+              "S3DataType": "S3Prefix",
+              "S3Uri": "${batch_transform_input_s3_uri}"
+            }
+          },
+          "ContentType": "application/jsonlines",
+          "SplitType": "Line"
+        },
+        "TransformOutput": {
+          "S3OutputPath": "${batch_transform_output_s3_uri}",
+          "Accept": "application/jsonlines",
+          "AssembleWith": "Line"
+        },
+        "TransformResources": {
+          "InstanceCount": 1,
+          "InstanceType": "ml.m5.xlarge"
+        },
+        "BatchStrategy": "SingleRecord"
+      },
+      "Next": "verifyIndexVectorDatabase",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "BatchTransformItemTowerError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+    "verifyIndexVectorDatabase": {
+      "Type": "Choice",
+      "Comment": "Verifica si el proceso PRCS-INDEX-VECTOR-DATABASE-002 está habilitado",
+      "Choices": [
+        {
+          "Next": "EnrichAndIndexOpenSearch",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[1]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[1].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "verifyTopKRecommender"
+    },
+    "EnrichAndIndexOpenSearch": {
+      "Type": "Task",
+      "Comment": "Glue Job 2: Lee Batch Transform output + Silver metadata → Bulk index OpenSearch kNN",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${items_opensearch_indexing_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[1].process_cod",
+          "--task_group_cod.$": "$.processes[1].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[1].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "verifyTopKRecommender",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "EnrichAndIndexOpenSearchError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+    "verifyTopKRecommender": {
+      "Type": "Choice",
+      "Comment": "Verifica si el proceso PRCS-BATCH-TRANSFORM-RECOMMENDER-TOPK-003 está habilitado",
+      "Choices": [
+        {
+          "Next": "GenerateTopKRecommendations",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[2]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[2].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "UpdateInferenceOrchestrationStatus"
+    },
+    "GenerateTopKRecommendations": {
+      "Type": "Task",
+      "Comment": "Glue Job 3: User Tower → kNN retrieval → Full Model reranking → Top-K table",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${topk_recommender_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[2].process_cod",
+          "--task_group_cod.$": "$.processes[2].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[2].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "verifyExplainabilitySilverSet",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "GenerateTopKRecommendationsError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+
+    "verifyExplainabilitySilverSet": {
+      "Type": "Choice",
+      "Comment": "Verifica si PRCS-IAGEN-SILVERSET-SLVR-004 está habilitado",
+      "Choices": [
+        {
+          "Next": "GenerateExplainabilitySilverSet",
+          "And": [
+            {
+              "Variable": "$.processes",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[3]",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.processes[3].flag_enabled",
+              "NumericEquals": 1
+            }
+          ]
+        }
+      ],
+      "Default": "UpdateInferenceOrchestrationStatus"
+    },
+
+    "GenerateExplainabilitySilverSet": {
+      "Type": "Task",
+      "Comment": "Glue Job 4: GPT-4 genera silver set de explicabilidad para fine-tuning Llama",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "${explainability_silver_set_glj}",
+        "Arguments": {
+          "--process_cod.$": "$.processes[3].process_cod",
+          "--task_group_cod.$": "$.processes[3].task_groups[0].task_group_cod",
+          "--task_cod.$": "$.processes[3].task_groups[0].tasks[0].task_cod",
+          "--pipeline_id.$": "$.pipeline_id",
+          "--correlation_id.$": "$.execution_id"
+        }
+      },
+      "Next": "UpdateInferenceOrchestrationStatus",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "GenerateExplainabilitySilverSetError",
+          "Next": "UpdateInferenceOrchestrationStatusError",
+          "ResultPath": "$.masterProcessError"
+        }
+      ],
+      "ResultPath": null
+    },
+    "UpdateInferenceOrchestrationStatus": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${updateInferenceOrchStatusARN}",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Success"
+    },
+    "UpdateInferenceOrchestrationStatusError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "Payload.$": "$",
+        "FunctionName": "${updateInferenceOrchStatusARN}"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Next": "Error"
+    },
+    "Success": {
+      "Type": "Succeed"
+    },
+    "Execution SKIPPED": {
+      "Type": "Succeed"
+    },
+    "Error": {
+      "Type": "Fail"
+    }
+  }
+}
