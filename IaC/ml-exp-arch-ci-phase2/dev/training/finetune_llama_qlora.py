@@ -27,7 +27,7 @@ import sys
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "-q",
     "transformers==4.44.2",
-    "trl==0.9.6",
+    "trl==0.10.1",
     "peft==0.12.0",
     "accelerate==0.33.0",
     "bitsandbytes==0.43.1",
@@ -275,6 +275,8 @@ def train(args):
         eval_dataset=dataset_dict["validation"],
         tokenizer=tokenizer,
         args=sft_config,
+        dataset_text_field="text",
+        max_seq_length=1024,
         data_collator=collator,
     )
 
