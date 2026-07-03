@@ -20,8 +20,20 @@ Framework: transformers + peft + trl (SFTTrainer)
 ==============================================================================
 """
 
-import os
+import subprocess
 import sys
+
+# Instalar dependencias antes de importar (garantiza versiones correctas)
+subprocess.check_call([
+    sys.executable, "-m", "pip", "install", "-q",
+    "trl==0.9.6",
+    "peft==0.12.0",
+    "accelerate==0.33.0",
+    "bitsandbytes==0.43.1",
+    "datasets==2.20.0",
+])
+
+import os
 import json
 import argparse
 import random
