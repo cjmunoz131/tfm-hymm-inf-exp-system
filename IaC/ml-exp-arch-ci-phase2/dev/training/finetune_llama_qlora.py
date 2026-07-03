@@ -287,6 +287,89 @@ def train(args):
     trainer.model.save_pretrained(model_dir)
     tokenizer.save_pretrained(model_dir)
 
+    # Incluir inference.py y requirements.txt en el model.tar.gz
+    # SageMaker empaqueta todo lo que esté en SM_MODEL_DIR como model.tar.gz
+    # El container de inferencia busca code/inference.py automáticamente
+    code_dir = os.path.join(model_dir, "code")
+    os.makedirs(code_dir, exist_ok=True)
+
+    inference_script = os.path.join(os.path.dirname(__file__), "inference.py")
+    if os.path.exists(inference_script):
+        # Si inference.py está en el source_dir del training job
+        import shutil
+        shutil.copy(inference_script, os.path.join(code_dir, "inference.py"))
+    else:
+        # Generar inference.py inline como fallback
+        inference_code = '''import os
+import json
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import PeftModel, PeftConfig
+
+
+def model_fn(model_dir):
+    peft_config = PeftConfig.from_pretrained(model_dir)
+    base_model_id = peft_config.base_model_name_or_path
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+    tokenizer.pad_token = tokenizer.eos_token
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True, bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    hf_token = os.environ.get("HF_TOKEN", "")
+    base_model = AutoModelForCausalLM.from_pretrained(
+        base_model_id, quantization_config=bnb_config,
+        device_map="auto", token=hf_token if hf_token else None,
+    )
+    model = PeftModel.from_pretrained(base_model, model_dir)
+    model.eval()
+    return {"model": model, "tokenizer": tokenizer}
+
+
+def input_fn(request_body, request_content_type):
+    if request_content_type == "application/json":
+        return json.loads(request_body)
+    raise ValueError(f"Unsupported content type: {request_content_type}")
+
+
+def predict_fn(input_data, model_dict):
+    model = model_dict["model"]
+    tokenizer = model_dict["tokenizer"]
+    prompt = input_data.get("inputs", "")
+    parameters = input_data.get("parameters", {})
+    max_new_tokens = parameters.get("max_new_tokens", 20)
+    temperature = parameters.get("temperature", 0.1)
+    repetition_penalty = parameters.get("repetition_penalty", 1.1)
+    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+    eot_token_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
+    eos_ids = [tokenizer.eos_token_id]
+    if eot_token_id is not None and eot_token_id != tokenizer.eos_token_id:
+        eos_ids.append(eot_token_id)
+    with torch.no_grad():
+        outputs = model.generate(
+            **inputs, max_new_tokens=max_new_tokens, temperature=temperature,
+            repetition_penalty=repetition_penalty, pad_token_id=tokenizer.eos_token_id,
+            eos_token_id=eos_ids, do_sample=True if temperature > 0 else False,
+        )
+    generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
+    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
+    return [{"generated_text": generated_text}]
+
+
+def output_fn(prediction, response_content_type):
+    if response_content_type == "application/json":
+        return json.dumps(prediction)
+    raise ValueError(f"Unsupported response type: {response_content_type}")
+'''
+        with open(os.path.join(code_dir, "inference.py"), "w") as f:
+            f.write(inference_code)
+
+    # requirements.txt para el container de inferencia
+    with open(os.path.join(code_dir, "requirements.txt"), "w") as f:
+        f.write("bitsandbytes==0.43.1\npeft==0.12.0\naccelerate==0.33.0\n")
+
+    print(f"Inference artifacts guardados en: {code_dir}")
+
     # Guardar métricas de entrenamiento
     train_metrics = trainer.state.log_history
     metrics_path = os.path.join(output_dir, "training_metrics.json")
