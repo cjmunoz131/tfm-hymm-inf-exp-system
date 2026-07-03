@@ -28,8 +28,12 @@ import random
 import numpy as np
 import torch
 from pathlib import Path
-
-
+from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import prepare_model_for_kbit_training
+from transformers import DataCollatorForLanguageModeling
+from peft import LoraConfig, get_peft_model
+from trl import SFTTrainer, SFTConfig
 # ==============================================================================
 # REPRODUCIBILIDAD
 # ==============================================================================
@@ -73,8 +77,7 @@ def load_and_format_datasets(data_dir):
     Carga train.jsonl y val.jsonl, aplica el template de LLaMA 3.
     Returns: datasets.DatasetDict con splits 'train' y 'validation'.
     """
-    from datasets import load_dataset
-
+    
     train_path = os.path.join(data_dir, "train.jsonl")
     val_path = os.path.join(data_dir, "val.jsonl")
 
@@ -112,9 +115,7 @@ def load_model_and_tokenizer(model_id, hf_token=None):
     Carga modelo base con cuantización 4-bit y tokenizador.
     QLoRA reduce el modelo de ~16GB a ~6GB VRAM.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from peft import prepare_model_for_kbit_training
-
+    
     print(f"Cargando modelo: {model_id}")
 
     # Tokenizador
@@ -153,8 +154,7 @@ def get_data_collator(tokenizer):
     Collator personalizado que enmascara el prompt (Loss = -100)
     para que el modelo solo aprenda a predecir las 3 keywords.
     """
-    from transformers import DataCollatorForLanguageModeling
-
+    
     response_template = "### Response:\n"
     response_template_ids = tokenizer.encode(response_template, add_special_tokens=False)
 
@@ -192,8 +192,6 @@ def get_data_collator(tokenizer):
 
 def train(args):
     """Orquesta el fine-tuning completo con QLoRA."""
-    from peft import LoraConfig, get_peft_model
-    from trl import SFTTrainer, SFTConfig
 
     seed_everything(args.seed)
 
