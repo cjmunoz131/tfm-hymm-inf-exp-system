@@ -26,6 +26,7 @@ import sys
 # Instalar dependencias antes de importar (garantiza versiones correctas)
 subprocess.check_call([
     sys.executable, "-m", "pip", "install", "-q",
+    "transformers==4.44.2",
     "trl==0.9.6",
     "peft==0.12.0",
     "accelerate==0.33.0",
