@@ -251,14 +251,18 @@ def build_user_profiles(df_interactions, df_movies, umbral_rating: float = 4.0) 
         # Top 3 géneros
         all_genres = []
         for gen in positives['generos']:
-            if isinstance(gen, str):
+            if isinstance(gen, list):
+                all_genres.extend(gen)
+            elif isinstance(gen, str):
                 all_genres.extend([g.strip() for g in gen.split(',') if g.strip()])
         top_genres = ", ".join([g[0] for g in Counter(all_genres).most_common(3)])
 
         # Top 5 keywords (de palabras_clave)
         all_kw = []
         for kw in positives['palabras_clave']:
-            if isinstance(kw, str) and kw.lower() not in ('nan', '', 'none'):
+            if isinstance(kw, list):
+                all_kw.extend(kw)
+            elif isinstance(kw, str) and kw.lower() not in ('nan', '', 'none'):
                 all_kw.extend([k.strip() for k in kw.split(',') if k.strip()])
         top_kw = ", ".join([k[0] for k in Counter(all_kw).most_common(5)])
         if not top_kw:

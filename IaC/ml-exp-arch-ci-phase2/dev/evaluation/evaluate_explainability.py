@@ -26,7 +26,8 @@ import random
 import numpy as np
 import torch
 from pathlib import Path
-
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import PeftModel, PeftConfig
 
 # ==============================================================================
 # PROMPT TEMPLATE (debe coincidir con el training)
@@ -110,9 +111,7 @@ def compute_rouge_l(prediction, reference):
 
 def load_model_for_inference(model_dir):
     """Carga el modelo fine-tuned (base + adapter LoRA) para inferencia."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-    from peft import PeftModel, PeftConfig
-
+    
     print(f"Cargando modelo desde: {model_dir}")
 
     # Leer configuración del adapter para obtener el base model
