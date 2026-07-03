@@ -273,7 +273,7 @@ def train(args):
         model=model,
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["validation"],
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         args=sft_config,
         data_collator=collator,
     )
