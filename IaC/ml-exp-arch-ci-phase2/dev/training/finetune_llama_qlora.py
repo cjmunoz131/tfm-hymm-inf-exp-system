@@ -1,19 +1,21 @@
 """
 ==============================================================================
-HYMM-REC Explainability: Fine-Tuning Llama 3.1 8B con QLoRA
+HYMM-REC Explainability: Fine-Tuning Llama 3.1 8B con QLoRA + Merge
 ==============================================================================
 SageMaker Training Job que ejecuta:
   1. Carga train.jsonl + val.jsonl desde S3
   2. Aplica template de prompt LLaMA 3 (Instruction + Input + Response)
   3. Configura QLoRA 4-bit (BitsAndBytes + LoRA adapters)
   4. Entrena con SFTTrainer (masked loss sobre respuesta únicamente)
-  5. Guarda adapter weights + tokenizer en /opt/ml/model/
+  5. Merge: Fusiona adapter LoRA con modelo base (modelo completo para TGI)
+  6. Guarda modelo merged + tokenizer en /opt/ml/model/
 
 Input channels:
   /opt/ml/input/data/train/ → train.jsonl, val.jsonl
-  
+
 Output:
-  /opt/ml/model/ → adapter weights (LoRA) + tokenizer + config
+  /opt/ml/model/ → modelo completo merged (FP16) + tokenizer
+  (TGI lo carga directamente sin PEFT ni inference.py custom)
 
 Estimator: HuggingFace (ml.g5.2xlarge — GPU A10G 24GB para QLoRA 4-bit)
 Framework: transformers + peft + trl (SFTTrainer)
@@ -40,13 +42,13 @@ import argparse
 import random
 import numpy as np
 import torch
-from pathlib import Path
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import prepare_model_for_kbit_training
 from transformers import DataCollatorForLanguageModeling
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer, SFTConfig
+
+
 # ==============================================================================
 # REPRODUCIBILIDAD
 # ==============================================================================
@@ -90,11 +92,9 @@ def load_and_format_datasets(data_dir):
     Carga train.jsonl y val.jsonl, aplica el template de LLaMA 3.
     Returns: datasets.DatasetDict con splits 'train' y 'validation'.
     """
-    
     train_path = os.path.join(data_dir, "train.jsonl")
     val_path = os.path.join(data_dir, "val.jsonl")
 
-    # Verificar existencia
     if not os.path.exists(train_path):
         raise FileNotFoundError(f"No se encontró train.jsonl en {data_dir}")
     if not os.path.exists(val_path):
@@ -124,19 +124,13 @@ def load_and_format_datasets(data_dir):
 # ==============================================================================
 
 def load_model_and_tokenizer(model_id, hf_token=None):
-    """
-    Carga modelo base con cuantización 4-bit y tokenizador.
-    QLoRA reduce el modelo de ~16GB a ~6GB VRAM.
-    """
-    
+    """Carga modelo base con cuantización 4-bit y tokenizador."""
     print(f"Cargando modelo: {model_id}")
 
-    # Tokenizador
     tokenizer = AutoTokenizer.from_pretrained(model_id, token=hf_token)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    # Configuración BitsAndBytes (4-bit quantization)
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -144,7 +138,6 @@ def load_model_and_tokenizer(model_id, hf_token=None):
         bnb_4bit_compute_dtype=torch.bfloat16,
     )
 
-    # Cargar modelo cuantizado
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=bnb_config,
@@ -164,10 +157,9 @@ def load_model_and_tokenizer(model_id, hf_token=None):
 
 def get_data_collator(tokenizer):
     """
-    Collator personalizado que enmascara el prompt (Loss = -100)
+    Collator que enmascara el prompt (Loss = -100)
     para que el modelo solo aprenda a predecir las 3 keywords.
     """
-    
     response_template = "### Response:\n"
     response_template_ids = tokenizer.encode(response_template, add_special_tokens=False)
 
@@ -200,25 +192,64 @@ def get_data_collator(tokenizer):
 
 
 # ==============================================================================
+# MERGE — Fusionar adapter con modelo base
+# ==============================================================================
+
+def merge_adapter_with_base(adapter_dir, model_dir, hf_token=None):
+    """
+    Carga el adapter LoRA guardado y lo fusiona con el modelo base.
+    Guarda el modelo completo merged en model_dir (listo para TGI).
+    """
+    from peft import AutoPeftModelForCausalLM
+
+    print("\n[MERGE] Cargando adapter para fusionar con modelo base...")
+
+    # Liberar memoria del modelo de training antes del merge
+    torch.cuda.empty_cache()
+
+    # Cargar adapter + modelo base y fusionar
+    merged_model = AutoPeftModelForCausalLM.from_pretrained(
+        adapter_dir,
+        torch_dtype=torch.bfloat16,
+        low_cpu_mem_usage=True,
+        token=hf_token,
+    )
+    merged_model = merged_model.merge_and_unload()
+
+    print(f"[MERGE] Guardando modelo merged en: {model_dir}")
+    merged_model.save_pretrained(model_dir, safe_serialization=True)
+
+    # Copiar tokenizer al directorio final
+    tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
+    tokenizer.save_pretrained(model_dir)
+
+    print("[MERGE] Modelo merged guardado exitosamente (listo para TGI)")
+
+    # Limpiar memoria
+    del merged_model
+    torch.cuda.empty_cache()
+
+
+# ==============================================================================
 # TRAINING — ORCHESTRATOR
 # ==============================================================================
 
 def train(args):
-    """Orquesta el fine-tuning completo con QLoRA."""
+    """Orquesta el fine-tuning completo con QLoRA + merge final."""
 
     seed_everything(args.seed)
 
     # 1. Cargar datos
-    print("\n[1/5] Cargando datasets...")
+    print("\n[1/6] Cargando datasets...")
     dataset_dict = load_and_format_datasets(args.data_dir)
 
     # 2. Cargar modelo
-    print("\n[2/5] Cargando modelo y tokenizador...")
+    print("\n[2/6] Cargando modelo y tokenizador...")
     hf_token = os.environ.get("HF_TOKEN", args.hf_token)
     model, tokenizer = load_model_and_tokenizer(args.model_id, hf_token)
 
     # 3. Configurar LoRA
-    print("\n[3/5] Configurando adaptadores LoRA...")
+    print("\n[3/6] Configurando adaptadores LoRA...")
     peft_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -234,10 +265,13 @@ def train(args):
     model.print_trainable_parameters()
 
     # 4. Configurar entrenamiento
-    print("\n[4/5] Configurando SFTTrainer...")
+    print("\n[4/6] Configurando SFTTrainer...")
 
     output_dir = os.environ.get("SM_OUTPUT_DATA_DIR", "/opt/ml/output/data")
     model_dir = os.environ.get("SM_MODEL_DIR", "/opt/ml/model")
+
+    # Directorio temporal para el adapter (antes del merge)
+    adapter_dir = os.path.join(output_dir, "adapter_checkpoint")
 
     sft_config = SFTConfig(
         output_dir=output_dir,
@@ -268,7 +302,7 @@ def train(args):
     collator = get_data_collator(tokenizer)
 
     # 5. Entrenar
-    print("\n[5/5] Iniciando entrenamiento SFT...")
+    print("\n[5/6] Iniciando entrenamiento SFT...")
     trainer = SFTTrainer(
         model=model,
         train_dataset=dataset_dict["train"],
@@ -282,102 +316,28 @@ def train(args):
 
     trainer.train()
 
-    # Guardar adapter final
-    print(f"\nGuardando adapter LoRA en: {model_dir}")
-    trainer.model.save_pretrained(model_dir)
-    tokenizer.save_pretrained(model_dir)
-
-    # Incluir inference.py y requirements.txt en el model.tar.gz
-    # SageMaker empaqueta todo lo que esté en SM_MODEL_DIR como model.tar.gz
-    # El container de inferencia busca code/inference.py automáticamente
-    code_dir = os.path.join(model_dir, "code")
-    os.makedirs(code_dir, exist_ok=True)
-
-    inference_script = os.path.join(os.path.dirname(__file__), "inference.py")
-    if os.path.exists(inference_script):
-        # Si inference.py está en el source_dir del training job
-        import shutil
-        shutil.copy(inference_script, os.path.join(code_dir, "inference.py"))
-    else:
-        # Generar inference.py inline como fallback
-        inference_code = '''import os
-import json
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from peft import PeftModel, PeftConfig
-
-
-def model_fn(model_dir):
-    peft_config = PeftConfig.from_pretrained(model_dir)
-    base_model_id = peft_config.base_model_name_or_path
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    tokenizer.pad_token = tokenizer.eos_token
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_use_double_quant=True,
-        bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-    hf_token = os.environ.get("HF_TOKEN", "")
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_id, quantization_config=bnb_config,
-        device_map="auto", token=hf_token if hf_token else None,
-    )
-    model = PeftModel.from_pretrained(base_model, model_dir)
-    model.eval()
-    return {"model": model, "tokenizer": tokenizer}
-
-
-def input_fn(request_body, request_content_type):
-    if request_content_type == "application/json":
-        return json.loads(request_body)
-    raise ValueError(f"Unsupported content type: {request_content_type}")
-
-
-def predict_fn(input_data, model_dict):
-    model = model_dict["model"]
-    tokenizer = model_dict["tokenizer"]
-    prompt = input_data.get("inputs", "")
-    parameters = input_data.get("parameters", {})
-    max_new_tokens = parameters.get("max_new_tokens", 20)
-    temperature = parameters.get("temperature", 0.1)
-    repetition_penalty = parameters.get("repetition_penalty", 1.1)
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    eot_token_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
-    eos_ids = [tokenizer.eos_token_id]
-    if eot_token_id is not None and eot_token_id != tokenizer.eos_token_id:
-        eos_ids.append(eot_token_id)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, max_new_tokens=max_new_tokens, temperature=temperature,
-            repetition_penalty=repetition_penalty, pad_token_id=tokenizer.eos_token_id,
-            eos_token_id=eos_ids, do_sample=True if temperature > 0 else False,
-        )
-    generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
-    generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-    return [{"generated_text": generated_text}]
-
-
-def output_fn(prediction, response_content_type):
-    if response_content_type == "application/json":
-        return json.dumps(prediction)
-    raise ValueError(f"Unsupported response type: {response_content_type}")
-'''
-        with open(os.path.join(code_dir, "inference.py"), "w") as f:
-            f.write(inference_code)
-
-    # requirements.txt para el container de inferencia
-    with open(os.path.join(code_dir, "requirements.txt"), "w") as f:
-        f.write("bitsandbytes==0.43.1\npeft==0.12.0\naccelerate==0.33.0\n")
-
-    print(f"Inference artifacts guardados en: {code_dir}")
+    # Guardar adapter en directorio temporal
+    print(f"\nGuardando adapter LoRA en: {adapter_dir}")
+    trainer.model.save_pretrained(adapter_dir)
+    tokenizer.save_pretrained(adapter_dir)
 
     # Guardar métricas de entrenamiento
     train_metrics = trainer.state.log_history
     metrics_path = os.path.join(output_dir, "training_metrics.json")
     with open(metrics_path, "w") as f:
         json.dump(train_metrics, f, indent=2)
-
     print(f"Métricas guardadas en: {metrics_path}")
-    print("\nFine-Tuning completado exitosamente.")
+
+    # Liberar memoria del trainer antes del merge
+    del trainer, model
+    torch.cuda.empty_cache()
+
+    # 6. Merge adapter con modelo base
+    print("\n[6/6] Merge: Fusionando adapter con modelo base...")
+    merge_adapter_with_base(adapter_dir, model_dir, hf_token)
+
+    print("\nPipeline completado: Training + Merge exitoso.")
+    print(f"Modelo merged listo para deploy con TGI en: {model_dir}")
 
 
 # ==============================================================================
@@ -385,7 +345,7 @@ def output_fn(prediction, response_content_type):
 # ==============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="QLoRA Fine-Tuning Llama 3.1 8B")
+    parser = argparse.ArgumentParser(description="QLoRA Fine-Tuning Llama 3.1 8B + Merge")
 
     # Model
     parser.add_argument("--model-id", type=str,
