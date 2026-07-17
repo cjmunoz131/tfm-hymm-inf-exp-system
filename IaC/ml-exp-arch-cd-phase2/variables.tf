@@ -78,7 +78,7 @@ variable "explainability_endpoint_config_name" {
 variable "endpoint_instance_type" {
   description = "Instance type for explainability inference endpoint (requires GPU)"
   type        = string
-  default     = "ml.g5.xlarge"
+  default     = "ml.g5.2xlarge"
 }
 
 variable "huggingface_inference_image" {
@@ -90,5 +90,20 @@ variable "huggingface_inference_image" {
 variable "model_package_group_name" {
   description = "Model Registry package group name"
   type        = string
-  default     = "hymmrec-explainability-llama"
+  default     = "hymmrec-explainability-llama-sm-pg"
+}
+
+variable "explainability_model_package_arn" {
+  type = string
+  default = "arn:aws:sagemaker:us-east-1:697682206292:model-package/hymmrec-explainability-llama-sm-pg/1"
+}
+
+variable "pytorch_inference_image" {
+  type = string
+  default = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-tgi-inference:2.4.0-tgi2.3.1-gpu-py311-cu124-ubuntu22.04"
+}
+
+variable "model_data_url" {
+  type = string
+  default = "s3://hymmrec-sagemaker-assets/hymmrec/explainability/training-output/hymmrec-exp-qlora-train-2026-07-05-12-17-57-056/output/model.tar.gz"
 }

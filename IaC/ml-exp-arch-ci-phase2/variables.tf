@@ -114,5 +114,5 @@ variable "endpoint_instance_type" {
 variable "model_package_group_name" {
   description = "SageMaker Model Registry package group name for explainability"
   type        = string
-  default     = "hymmrec-explainability-llama"
+  default     = "explainability-llama"
 }

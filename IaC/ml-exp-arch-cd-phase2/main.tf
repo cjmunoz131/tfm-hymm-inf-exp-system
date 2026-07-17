@@ -48,8 +48,14 @@ module "aws_ml_compute_model_serving_explainability_model_layer_module" {
 
   sagemaker_model_primary_container = [
     {
-      image          = var.huggingface_inference_image
-      model_data_url = "s3://${var.sagemaker_assets_bucket}/hymmrec/explainability/model-artifacts/model.tar.gz"
+      image          = var.pytorch_inference_image
+      model_data_url = var.model_data_url
+      environment = {
+        HF_MODEL_ID      = "/opt/ml/model"
+        SM_NUM_GPUS      = "1"
+        MAX_INPUT_LENGTH = "1024"
+        MAX_TOTAL_TOKENS = "1100"
+    }
     }
   ]
 
@@ -73,11 +79,11 @@ module "aws_ml_compute_model_serving_explainability_model_layer_module" {
 #     aws.main = aws.account1
 #   }
 #   source = "git@github.com:cjmunoz131/terraform_modules//modules/aws/aws-ml-governance-model-serving-endpoint-sagemaker"
-#
+
 #   enable_sagemaker_endpoint = true
 #   project                   = var.project
 #   endpoint-name             = var.explainability_endpoint_name
-#
+
 #   enable_sagemaker_endpoint_configuration = true
 #   endpoint_configuration_name             = var.explainability_endpoint_config_name
 #   sagemaker_endpoint_configuration_kms_key_arn = var.storage_kms_key_id
@@ -89,7 +95,7 @@ module "aws_ml_compute_model_serving_explainability_model_layer_module" {
 #       instance_type          = var.endpoint_instance_type
 #     }
 #   ]
-#
+
 #   # Autoscaling (scale-to-zero no disponible para GPU endpoints)
 #   enable_sagemaker_default_autoscaling = true
 #   endpoint_instance_min_capacity       = 1
