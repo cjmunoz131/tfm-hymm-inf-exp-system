@@ -116,3 +116,13 @@ variable "model_package_group_name" {
   type        = string
   default     = "explainability-llama"
 }
+
+# ==============================================================================
+# SageMaker Pipeline
+# ==============================================================================
+
+variable "sagemaker_pipeline_name" {
+  description = "Name of the SageMaker Pipeline for explainability CI"
+  type        = string
+  default     = "explainability-ci"
+}
