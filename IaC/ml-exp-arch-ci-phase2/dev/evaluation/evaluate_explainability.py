@@ -117,17 +117,43 @@ def load_model_with_adapter(adapter_dir, base_model_id=None, hf_token=None):
     Carga el modelo base en BF16 nativo + aplica adapter LoRA encima.
     NO usa cuantizacion, NO hace merge. Preserva calidad del fine-tuning.
 
+    Si el adapter_dir contiene un model.tar.gz (Processing Job input),
+    lo descomprime primero.
+
     Mismo enfoque que saveAndEvaluation.py de Colab:
       base_model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.bfloat16)
       model = PeftModel.from_pretrained(base_model, adapter_path)
     """
+    import tarfile
+    import glob
+
+    # Descomprimir model.tar.gz si existe (Processing Jobs no lo hacen automaticamente)
+    tar_files = glob.glob(os.path.join(adapter_dir, "*.tar.gz"))
+    if tar_files:
+        print(f"Descomprimiendo {tar_files[0]}...")
+        with tarfile.open(tar_files[0], "r:gz") as tar:
+            tar.extractall(path=adapter_dir)
+        print(f"Contenido descomprimido: {os.listdir(adapter_dir)}")
+
+    # Buscar adapter_config.json (puede estar en subdirectorio "model/")
+    config_path = os.path.join(adapter_dir, "adapter_config.json")
+    if not os.path.exists(config_path):
+        # Buscar en subdirectorios
+        for root, dirs, files in os.walk(adapter_dir):
+            if "adapter_config.json" in files:
+                adapter_dir = root
+                config_path = os.path.join(root, "adapter_config.json")
+                print(f"adapter_config.json encontrado en: {adapter_dir}")
+                break
+
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"No se encontro adapter_config.json en {adapter_dir}")
+
     # Leer base_model_id desde adapter_config.json si no se proporciona
     if base_model_id is None:
-        config_path = os.path.join(adapter_dir, "adapter_config.json")
-        if os.path.exists(config_path):
-            with open(config_path, "r") as f:
-                adapter_config = json.load(f)
-            base_model_id = adapter_config.get("base_model_name_or_path")
+        with open(config_path, "r") as f:
+            adapter_config = json.load(f)
+        base_model_id = adapter_config.get("base_model_name_or_path")
         if base_model_id is None:
             base_model_id = "meta-llama/Meta-Llama-3.1-8B-Instruct"
 

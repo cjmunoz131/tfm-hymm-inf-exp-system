@@ -54,8 +54,8 @@ terraform {
 locals {
   env = terraform.workspace
   account_mapping = {
-    dev : [""]
-    shared_services : ""
+    dev : ["697682206292"]
+    shared_services : "756815134200"
   }
   commons = {
     customer    = var.owner
