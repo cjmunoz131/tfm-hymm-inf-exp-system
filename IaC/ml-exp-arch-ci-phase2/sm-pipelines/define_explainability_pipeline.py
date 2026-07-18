@@ -92,7 +92,7 @@ DEFAULT_GOLD_BUCKET = "hymmrec-dilkehousegold01"
 DEFAULT_PLATINUM_BUCKET = "hymmrec-sagemaker-assets"
 
 # --- S3 Paths ---
-S3_GOLD_SET_INPUT = f"s3://{DEFAULT_GOLD_BUCKET}/data/ml_recommendations/explainability/"
+S3_GOLD_SET_INPUT = f"s3://{DEFAULT_GOLD_BUCKET}/data/ml_recommendations/explainability/goldset/"
 S3_EXPLAINABILITY_PREFIX = f"s3://{DEFAULT_PLATINUM_BUCKET}/hymmrec/explainability"
 S3_SPLITS_OUTPUT = f"{S3_EXPLAINABILITY_PREFIX}/datasets/splits/"
 S3_TRAINING_OUTPUT = f"{S3_EXPLAINABILITY_PREFIX}/training-output/"
@@ -107,7 +107,7 @@ EVALUATION_SCRIPT = os.path.join(SCRIPT_DIR, "..", "dev", "evaluation", "evaluat
 # --- Instancias ---
 PROCESSING_INSTANCE = "ml.m5.large"
 TRAINING_INSTANCE = "ml.g5.12xlarge"
-EVALUATION_INSTANCE = "ml.g5.2xlarge"
+EVALUATION_INSTANCE = "ml.g5.12xlarge"
 
 # --- Model Registry ---
 MODEL_PACKAGE_GROUP_NAME = "hymmrec-explainability-llama"
