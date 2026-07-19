@@ -99,11 +99,20 @@ variable "explainability_model_package_arn" {
 }
 
 variable "pytorch_inference_image" {
-  type = string
-  default = "763104351884.dkr.ecr.us-east-1.amazonaws.com/huggingface-pytorch-tgi-inference:2.4.0-tgi2.3.1-gpu-py311-cu124-ubuntu22.04"
+  description = "PyTorch inference container image (GPU, for code/inference.py)"
+  type        = string
+  default     = "763104351884.dkr.ecr.us-east-1.amazonaws.com/pytorch-inference:2.1.0-gpu-py310-cu118-ubuntu20.04-sagemaker"
 }
 
 variable "model_data_url" {
-  type = string
-  default = "s3://hymmrec-sagemaker-assets/hymmrec/explainability/training-output/hymmrec-exp-qlora-train-2026-07-05-12-17-57-056/output/model.tar.gz"
+  description = "S3 URI of model.tar.gz (adapter + code/inference.py)"
+  type        = string
+  default     = "s3://hymmrec-sagemaker-assets/hymmrec/explainability/training-output/pipelines-mhq3tv2lrilj-QLoRAFineTuning-DF5hpQs01S/output/model.tar.gz"
+}
+
+variable "hf_token" {
+  description = "HuggingFace API token for downloading base model at endpoint startup"
+  type        = string
+  sensitive   = true
+  default     = ""
 }

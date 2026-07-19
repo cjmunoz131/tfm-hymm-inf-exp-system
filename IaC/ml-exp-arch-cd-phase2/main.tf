@@ -51,11 +51,8 @@ module "aws_ml_compute_model_serving_explainability_model_layer_module" {
       image          = var.pytorch_inference_image
       model_data_url = var.model_data_url
       environment = {
-        HF_MODEL_ID      = "/opt/ml/model"
-        SM_NUM_GPUS      = "1"
-        MAX_INPUT_LENGTH = "1024"
-        MAX_TOTAL_TOKENS = "1100"
-    }
+        HF_TOKEN = var.hf_token
+      }
     }
   ]
 

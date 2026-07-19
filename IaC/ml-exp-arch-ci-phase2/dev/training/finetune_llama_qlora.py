@@ -304,7 +304,10 @@ def predict_fn(input_data, model_dict):
     else:
         generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
         prediccion = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
-    prediccion = prediccion.split("://")[0].strip().split("http")[0].strip().rstrip(".")
+    prediccion = prediccion.split("://")[0].strip().split("http")[0].strip()
+    prediccion = prediccion.split(".")[0].strip()
+    prediccion = prediccion.split("\\n")[0].strip()
+    prediccion = prediccion.rstrip(".")
     etiquetas = [e.strip() for e in prediccion.split(",")]
     prediccion_final = ", ".join(etiquetas[:3])
     del inputs, outputs

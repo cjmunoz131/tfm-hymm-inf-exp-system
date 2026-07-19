@@ -229,9 +229,11 @@ def generate_prediction(model, tokenizer, muestra):
     else:
         prediccion = resultado_crudo.strip()
 
-    # Post-procesamiento (mismo que Colab)
+    # Post-procesamiento (mismo que Colab + corte por punto)
     prediccion = prediccion.split("://")[0].strip()
     prediccion = prediccion.split("http")[0].strip()
+    prediccion = prediccion.split(".")[0].strip()
+    prediccion = prediccion.split("\n")[0].strip()
     prediccion = prediccion.rstrip(".")
 
     # Forzar exactamente 3 keywords

@@ -139,9 +139,11 @@ def predict_fn(input_data, model_dict):
         generated_ids = outputs[0][inputs["input_ids"].shape[1]:]
         prediccion = tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
-    # Post-procesamiento (mismo que Colab)
+    # Post-procesamiento (mismo que Colab — limpieza robusta)
     prediccion = prediccion.split("://")[0].strip()
     prediccion = prediccion.split("http")[0].strip()
+    prediccion = prediccion.split(".")[0].strip()
+    prediccion = prediccion.split("\n")[0].strip()
     prediccion = prediccion.rstrip(".")
 
     # Forzar exactamente 3 keywords
